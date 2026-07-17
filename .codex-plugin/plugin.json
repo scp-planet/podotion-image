@@ -1,0 +1,35 @@
+{
+  "name": "podotion-image",
+  "version": "1.0.1",
+  "description": "Generate and edit images through Podotion with durable MCP resources.",
+  "author": {
+    "name": "Podotion"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "image-generation",
+    "gpt-image-2",
+    "podotion",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Podotion Image",
+    "shortDescription": "Generate and edit durable image files",
+    "longDescription": "Generate and edit images through Podotion, save them in the active workspace, and expose them as durable MCP image resources.",
+    "developerName": "Podotion",
+    "category": "Creative",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "MCP"
+    ],
+    "defaultPrompt": [
+      "Generate an image from my description",
+      "Edit the last generated image",
+      "Publish an existing image to Outputs"
+    ],
+    "brandColor": "#166534"
+  }
+}

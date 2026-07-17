@@ -1,0 +1,145 @@
+{
+  "skill_name": "podotion-image",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "用户先问‘现在几点了？’，你已经用当前文本模型回答。同一个会话中，用户接着说：‘生成一张戴黄色雨帽的小猫图片，正方形。’",
+      "expected_output": "调用 Podotion MCP generate，传入稳定 request_key、state_scope 和语义解析后的绝对 output_dir；向固定 Podotion Images generation 端点最多发起一次 POST；提示词只保留小猫、黄色雨帽和正方形要求；默认保存到当前 workspace 的 PodotionImage，返回 MCP image、resource_link、内联预览和文件链接。",
+      "files": [],
+      "expectations": [
+        "Invokes the Podotion MCP generate tool rather than a built-in image tool",
+        "Supplies a stable request_key and state_scope before the billable call",
+        "Sends at most one upstream POST for the user action",
+        "Uses the fixed Podotion Images API endpoint without a provider or Responses fallback",
+        "The outgoing image request uses gpt-image-2 instead of the conversation text model",
+        "The final assistant response embeds the generated local image and includes a standalone absolute-path file link",
+        "Uses the active workspace PodotionImage directory when the user did not request another location",
+        "Returns standard MCP image and resource_link content without another provider request",
+        "Unrelated time-conversation text is absent from the image prompt"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "上一条助手回复只生成了一张小猫图片。用户说：‘把刚才那张的雨帽改成红色，其他构图保持不变。’",
+      "expected_output": "自动选择同一 state_scope 和输出目录的唯一上一张图，以新的稳定 request_key 调用 MCP edit 且 use_last=true，将图片作为 multipart image[] 传入单次 Images edit 请求，并返回 image 与 resource_link。",
+      "files": [],
+      "expectations": [
+        "Uses MCP edit with use_last=true for the single unambiguous prior image",
+        "Reuses the same state_scope and supplies a new stable request_key for the edit action",
+        "Carries the source image into the request as a multipart image[] part",
+        "Preserves the requested composition constraint in the edit prompt",
+        "Embeds the edited image and includes a standalone file link in the current response"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "当前对话里有两张同样合理的候选图：一张戴红帽的小猫和一张戴蓝帽的小猫。用户说：‘把那张的背景改成海边。’",
+      "expected_output": "不擅自选图、不发起生图请求，先请用户明确是红帽还是蓝帽图片。",
+      "files": [],
+      "expectations": [
+        "Asks one concise clarification identifying the two candidate images",
+        "Does not invoke generate or edit before the ambiguity is resolved"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "用户说：‘请用文字解释什么是图片生成模型，不要生成图片。’",
+      "expected_output": "普通文本回答，不触发 podotion-image skill，不调用任何生图脚本或图片工具。",
+      "files": [],
+      "expectations": [
+        "Answers in text only",
+        "Does not invoke the Podotion script or any image-generation tool"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "用户要求生成一张森林图片，但 Sub2API 返回的错误明确表示当前分组未开启‘允许图片生成’。",
+      "expected_output": "停止并简洁说明 PodotionImageSk 对应分组需开启图片生成；不泄露密钥、Authorization header 或原始上游响应中的凭据。",
+      "files": [],
+      "expectations": [
+        "Explains that image generation must be enabled for the current Sub2API group",
+        "Refers only to the already installed PodotionImageSk credential",
+        "Does not reveal credentials or raw authorization headers"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "用户要求生成一张图，但直连 Podotion Images API 返回无可用账号或模型不支持的路由错误。PodotionImageSk 对应分组应只路由到支持 gpt-image-2 的图片账号。",
+      "expected_output": "检查该密钥对应分组已启用图片生成，并检查图片账号使用非空的 gpt-image-2 显式映射；提醒空映射表示支持全部模型，可能破坏确定路由。不要切换 Responses 或要求图片账号增加文本模型。",
+      "files": [],
+      "expectations": [
+        "Recommends a non-empty gpt-image-2 mapping for the image account",
+        "Keeps the fixed Images API path and does not require a text model",
+        "Warns that an empty mapping means all models and can route to the wrong account",
+        "Does not advise switching to Codex provider or CC Switch credentials"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "当前是项目会话，项目 workspace 是 /work/site。用户说：‘生成一张 16:9 的绿色山谷头图。’没有提到保存位置。",
+      "expected_output": "在请求前将输出目录解析为 /work/site/PodotionImage，使用 skill 脚本的绝对路径并保持 /work/site 为工作目录；不将图片写入 skill 安装目录。",
+      "files": [],
+      "expectations": [
+        "Resolves the default output directory to /work/site/PodotionImage",
+        "Invokes the executor by absolute path while preserving the workspace working directory",
+        "Does not use the installed skill directory as the image output directory"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "当前项目 workspace 是 /work/site。用户说：‘画一张透明背景的产品图，放到 assets/generated 里。’",
+      "expected_output": "将用户的相对位置解析为 /work/site/assets/generated，向执行器传入该绝对路径后再发起生图请求。",
+      "files": [],
+      "expectations": [
+        "Resolves assets/generated relative to the active project workspace",
+        "Passes the normalized absolute directory through the internal --output-dir option",
+        "Does not resolve the relative path against the skill installation directory"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "当前是没有项目的 App 会话，宿主给出的 conversation workspace 是 C:\\ChatWork\\task-42。用户说：‘生成一张夏日海报。’",
+      "expected_output": "默认输出到 C:\\ChatWork\\task-42\\PodotionImage，而不是 CODEX_HOME 或 skill 目录。",
+      "files": [],
+      "expectations": [
+        "Uses the conversation workspace when no project workspace exists",
+        "Appends PodotionImage to the projectless conversation workspace",
+        "Does not fall back to CODEX_HOME when conversation workspace metadata is available"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "当前项目中同时存在 assets/images 和 public/images。用户说：‘生成一张 logo，放到图片目录。’",
+      "expected_output": "在发起任何可计费请求前，简洁询问用户指的是 assets/images 还是 public/images。",
+      "files": [],
+      "expectations": [
+        "Identifies both plausible output directories in one concise clarification",
+        "Does not invoke generate or edit before the output ambiguity is resolved"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "用户说：‘生成一张黑白城市摄影，保存到 /srv/site/static/renders。’生图成功后，当前宿主的 Outputs 登记能力返回错误。",
+      "expected_output": "在请求前使用用户给出的绝对目录 /srv/site/static/renders。图片成功落盘后，保留 ok:true 结果，返回内联预览和独立文件链接；不因 Outputs 登记失败再次调用生图接口。",
+      "files": [],
+      "expectations": [
+        "Preserves and normalizes the explicit absolute output directory",
+        "Keeps the successfully saved PNG when host output registration fails",
+        "Provides both an inline preview and a standalone file link",
+        "Does not retry generate or edit to recover an Outputs registration failure"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "当前是 macOS 项目会话，workspace 是 /Users/ada/Creative Work/site。用户说：‘生成一张产品海报，放到 ~/Pictures/Podotion Exports。’",
+      "expected_output": "在不发起请求的解析阶段将当前用户的 ~ 展开为 /Users/ada，将绝对 output_dir=/Users/ada/Pictures/Podotion Exports 与稳定 request_key/state_scope 传给 MCP generate；路径空格不经 shell 拼接。",
+      "files": [],
+      "expectations": [
+        "Expands the current-user tilde to /Users/ada on macOS",
+        "Preserves spaces in the absolute macOS output path",
+        "Passes stable request_key and state_scope values",
+        "Does not treat the macOS path as Windows or WSL syntax"
+      ]
+    }
+  ]
+}
