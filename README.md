@@ -28,10 +28,29 @@ Windows、WSL、macOS 和 Linux 都使用安装时当前运行时的原生 Pytho
 ```text
 请从 https://github.com/scp-planet/podotion-image.git 安装或更新 podotion-image Plugin。我的 PodotionImageSk 是 {{PodotionImageSk}}。
 
-请在当前 Codex 运行时内执行：将仓库浅克隆到权限受限的随机临时目录，确认 origin 与上述 GitHub 地址一致，并校验 .codex-plugin/plugin.json、.mcp.json、skills/podotion-image/SKILL.md、mcp/server.py、scripts/install.py 和生图执行器都存在。先运行 scripts/install.py --dry-run 并检查计划，再执行正式安装。通过标准输入将密钥传给安装后的 configure_direct.py --stdin --force；不得把密钥放入命令行参数、环境变量、日志、仓库或回复内容。然后运行不计费的 doctor 检查，不得运行 --image-probe。成功后删除临时克隆，告知我安装目录、配置路径和检查结果，但不得显示密钥。如果远程仓库不可访问或校验失败，立即停止，不得改用未经校验的其他来源。
+请在当前 Codex 运行时内执行以下步骤：
+1. 创建权限受限的随机临时目录，使用当前运行时的原生 Git 执行：git clone --depth 1 https://github.com/scp-planet/podotion-image.git <clone-dir>。
+2. 仅在原生 Windows 中，且首次 clone 错误同时包含 schannel、AcquireCredentialsHandle failed 和 SEC_E_NO_CREDENTIALS 时，新建另一个权限受限的随机临时目录，对同一 GitHub URL 只重试一次：git -c http.sslBackend=openssl clone --depth 1 https://github.com/scp-planet/podotion-image.git <new-clone-dir>。这是唯一允许的下载降级；不得执行 git config --global 或 --system，不得设置 http.sslVerify=false，不得改用代理、镜像、归档下载、附件或 WSL。错误类型不同或该次重试仍失败时立即停止。
+3. clone 成功后确认退出状态为 0、origin 严格等于上述 GitHub 地址且 git rev-parse --is-shallow-repository 返回 true。仅当这些检查通过时，无法读取全局 excludesfile 的警告可以忽略。校验 .codex-plugin/plugin.json、.mcp.json、skills/podotion-image/SKILL.md、mcp/server.py、scripts/install.py 和生图执行器都存在。
+4. 先运行 scripts/install.py --dry-run 并检查计划，再执行正式安装。通过标准输入将密钥传给安装后的 configure_direct.py --stdin --force；不得把密钥放入命令行参数、环境变量、日志、仓库或回复内容。
+5. 运行不计费的 doctor 检查，不得运行 --image-probe。成功后删除本次创建的所有临时目录，告知我安装目录、配置路径和检查结果，但不得显示密钥。
+
+如果远程仓库在上述唯一一次受限重试后仍不可访问，或任一来源、文件、安装计划及 doctor 校验失败，立即停止，不得改用未经校验的其他来源。
 ```
 
 安装或更新完成后，新建一个 Codex 任务，使 Plugin Skill 和 MCP server 按新配置加载。
+
+### Windows Schannel 克隆故障
+
+部分 Windows Codex 进程调用 Git for Windows 时，Schannel 可能在 TLS 初始化阶段返回 `SEC_E_NO_CREDENTIALS`。这不是 GitHub 仓库凭据错误，也不能通过关闭 TLS 校验解决。
+
+安装提示词只允许对此特定错误使用单命令配置：
+
+```powershell
+git -c http.sslBackend=openssl clone --depth 1 https://github.com/scp-planet/podotion-image.git <new-clone-dir>
+```
+
+该参数不会修改用户级或系统级 Git 配置。若 OpenSSL 重试失败，应保留脱敏错误并停止安装；不要永久切换 Git 后端，也不要绕过证书验证。
 
 ### 手动运行安装器
 
