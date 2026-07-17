@@ -51,7 +51,7 @@ py -3 scripts\install.py --dry-run
 py -3 scripts\install.py
 ```
 
-安装器会把 Plugin 源码安装到当前运行时的 `~/plugins/podotion-image`，维护 `~/.agents/plugins/marketplace.json`，并注册 `podotion-image@personal`。如存在 standalone `$CODEX_HOME/skills/podotion_image`，安装成功后会将它移到 `.backup` 路径，避免两套同名工作流同时触发。
+安装器会把 Plugin 源码安装到当前运行时的 `~/plugins/podotion-image`，维护 `~/.agents/plugins/marketplace.json`，并注册 `podotion-image@personal`。安装和更新不会读取、移动或删除 `$CODEX_HOME/skills` 中的 standalone Skill。
 
 手动配置凭据和运行不计费检查：
 
@@ -67,6 +67,20 @@ py -3 "$env:USERPROFILE\plugins\podotion-image\skills\podotion-image\scripts\con
 py -3 "$env:USERPROFILE\plugins\podotion-image\skills\podotion-image\scripts\podotion_image.py" doctor
 ```
 
+### 安装目录的职责
+
+- 随机临时 clone 仅用于从 GitHub 下载并校验一次安装输入。正式安装完成后删除它，可避免残留密钥操作上下文、过期 checkout 和重复源码。
+- `~/plugins/podotion-image` 是持久的个人 Marketplace 源。安装器把校验后的 Plugin 复制到这里，后续可从这里重新注册。
+- `$CODEX_HOME/plugins/cache/personal/podotion-image/<version>` 是 Codex 管理的已安装副本。Codex App 正常从这个副本加载 Skill 和 MCP；它不是随机 Git 临时目录。
+
+不要手工编辑 Plugin cache。若 cache 被手动清空，可从持久 Marketplace 源直接重新注册：
+
+```bash
+codex plugin add podotion-image@personal
+```
+
+也可以重新执行上方 GitHub 安装提示词，从新的临时 clone 完整安装。不要在 `~/plugins/podotion-image` 内直接运行安装器，因为该目录已经是安装目标。恢复后重启 Codex App 并新建任务，让 Skill 和 MCP server 重新加载。
+
 ## 跨平台目录规则
 
 `CODEX_HOME` 始终优先。未显式设置时，原生 Windows 回退到 `%USERPROFILE%\.codex`，WSL、macOS 和 Linux 回退到 `$HOME/.codex`。
@@ -81,6 +95,7 @@ py -3 "$env:USERPROFILE\plugins\podotion-image\skills\podotion-image\scripts\pod
 Codex App 可以在 WSL 内运行 agent，同时设置 `CODEX_HOME=/mnt/c/Users/<name>/.codex` 共享 Windows Codex 状态。在此布局中：
 
 - 凭据位于 `$CODEX_HOME/podotion-image/provider.toml`，Windows 和 WSL 共用同一份凭据。
+- 安装副本的 `.mcp.json` 显式传递安装时解析出的绝对 `CODEX_HOME`，即使 MCP 子进程未继承 Codex App 的环境，也会读取同一份凭据。
 - Plugin 源、个人 Marketplace、原生 Python 和 Outputs 资源登记仍跟随当前运行时的 `HOME`。
 - WSL 的平台 marker 位于 `$CODEX_HOME/.podotion-image-runtimes/wsl/`，不与原生 Windows marker 冲突。
 - 在 Codex App 中切换 Windows 与 WSL 运行时后，需在新运行时中重新运行一次安装器，然后新建任务。
@@ -128,6 +143,28 @@ codex plugin remove podotion-image@personal
 ```
 
 然后从当前运行时的 `~/.agents/plugins/marketplace.json` 中删除 `podotion-image` 条目，并删除 `~/plugins/podotion-image`。凭据不会随 Plugin 卸载自动删除；仅在确认不再使用时手动删除 `$CODEX_HOME/podotion-image/provider.toml`。共享 `CODEX_HOME` 时，删除凭据会同时影响 Windows 和 WSL。
+
+### 手动移除 standalone Skill
+
+standalone Skill 不属于 Plugin 安装器的生命周期。仅在确认本机还残留开发版 standalone Skill 时手动删除。
+
+WSL、macOS 或 Linux：
+
+```bash
+rm -rf -- \
+  "${CODEX_HOME:-$HOME/.codex}/skills/podotion_image" \
+  "${CODEX_HOME:-$HOME/.codex}/skills/podotion_image.backup"
+```
+
+Windows PowerShell：
+
+```powershell
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+Remove-Item -LiteralPath (Join-Path $codexHome "skills\podotion_image") -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $codexHome "skills\podotion_image.backup") -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+这些命令不会删除 Plugin、个人 Marketplace、已生成图片或 `$CODEX_HOME/podotion-image/provider.toml`。执行后重启 Codex App 并新建任务，确认技能列表中只保留 `podotion-image:podotion-image`。
 
 ## 开发、测试与发布
 

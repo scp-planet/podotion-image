@@ -94,6 +94,7 @@ class MCPServerTests(unittest.TestCase):
         config = manifest["mcpServers"]["podotion-image"]
         self.assertEqual(config["tool_timeout_sec"], 3600)
         self.assertEqual(config["args"][-1], "--stdio")
+        self.assertEqual(config["env_vars"], ["CODEX_HOME"])
 
     def test_server_version_is_read_from_plugin_manifest(self) -> None:
         manifest = json.loads(
@@ -388,15 +389,23 @@ class MCPServerTests(unittest.TestCase):
         self.assertFalse(args.image_probe)
 
     def test_request_status_is_read_only(self) -> None:
-        result = self.server.call_tool(
-            "request_status",
+        with mock.patch.dict(
+            server.os.environ,
             {
-                "output_dir": "renders",
-                "workspace_root": str(self.root),
-                "request_key": "status-1",
-                "state_scope": "thread-status",
+                "CODEX_HOME": "/mnt/c/Users/Ada/.codex",
+                "PODOTION_RUNTIME_TEST": "preserved",
             },
-        )
+            clear=True,
+        ):
+            result = self.server.call_tool(
+                "request_status",
+                {
+                    "output_dir": "renders",
+                    "workspace_root": str(self.root),
+                    "request_key": "status-1",
+                    "state_scope": "thread-status",
+                },
+            )
         self.assertFalse(result["isError"])
         self.assertEqual(result["structuredContent"]["status"], "completed")
         self.assertEqual(
@@ -407,7 +416,11 @@ class MCPServerTests(unittest.TestCase):
                     (
                         "status-1",
                         str(self.root / "renders"),
-                        {"CODEX_THREAD_ID": "thread-status"},
+                        {
+                            "CODEX_HOME": "/mnt/c/Users/Ada/.codex",
+                            "PODOTION_RUNTIME_TEST": "preserved",
+                            "CODEX_THREAD_ID": "thread-status",
+                        },
                     ),
                 )
             ],

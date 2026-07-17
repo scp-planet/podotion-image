@@ -66,20 +66,12 @@ class CodexHomeTests(unittest.TestCase):
         )
 
     def test_wsl_mount_uses_a_private_runtime_marker(self) -> None:
-        from scripts.install import legacy_skill_paths, platform_marker_path
+        from scripts.install import platform_marker_path
 
         self.assertEqual(
             platform_marker_path("/mnt/c/Users/Ada/.codex", PlatformKind.WSL),
             "/mnt/c/Users/Ada/.codex/.podotion-image-runtimes/wsl/.podotion-image-platform.json",
         )
-        legacy, backup = legacy_skill_paths(
-            "/mnt/c/Users/Ada/.codex", PlatformKind.WSL
-        )
-        self.assertEqual(
-            legacy,
-            "/mnt/c/Users/Ada/.codex/skills/podotion_image",
-        )
-        self.assertEqual(backup, f"{legacy}.backup")
 
     def test_wsl_uses_home_when_windows_profile_is_also_present(self) -> None:
         self.assertEqual(
@@ -123,6 +115,7 @@ class InstallPlanTests(unittest.TestCase):
                 "source": r"D:\src\podotion-image",
                 "python": r"C:\Python314\python.exe",
                 "destination": r"C:\Users\Ada\plugins\podotion-image",
+                "codex_home": r"C:\Users\Ada\.codex",
             },
             {
                 "platform": "wsl",
@@ -130,6 +123,7 @@ class InstallPlanTests(unittest.TestCase):
                 "source": "/src/podotion-image",
                 "python": "/usr/bin/python3",
                 "destination": "/home/ada/plugins/podotion-image",
+                "codex_home": "/home/ada/.codex",
             },
             {
                 "platform": "macos",
@@ -137,6 +131,7 @@ class InstallPlanTests(unittest.TestCase):
                 "source": "/src/podotion-image",
                 "python": "/opt/homebrew/bin/python3",
                 "destination": "/Users/ada/plugins/podotion-image",
+                "codex_home": "/Users/ada/.codex",
             },
             {
                 "platform": "linux",
@@ -144,6 +139,7 @@ class InstallPlanTests(unittest.TestCase):
                 "source": "/src/podotion-image",
                 "python": "/usr/bin/python3",
                 "destination": "/home/ada/plugins/podotion-image",
+                "codex_home": "/home/ada/.codex",
             },
         )
         for case in cases:
@@ -156,6 +152,7 @@ class InstallPlanTests(unittest.TestCase):
                     check_marker=False,
                 )
                 self.assertEqual(plan.plugin_destination, case["destination"])
+                self.assertEqual(plan.codex_home, case["codex_home"])
                 self.assertEqual(
                     plan.codex_command,
                     ("codex", "plugin", "add", "podotion-image@personal"),
@@ -164,23 +161,25 @@ class InstallPlanTests(unittest.TestCase):
                     plan.codex_rollback_command,
                     ("codex", "plugin", "remove", "podotion-image@personal"),
                 )
-                separator = "\\" if case["platform"] == "windows" else "/"
-                self.assertTrue(
-                    plan.legacy_skill.endswith(
-                        f"{separator}skills{separator}podotion_image"
-                    )
-                )
-                self.assertEqual(plan.legacy_backup, f"{plan.legacy_skill}.backup")
                 config = json.loads(plan.mcp_json)
                 server = config["mcpServers"]["podotion-image"]
                 self.assertEqual(server["command"], case["python"])
                 self.assertEqual(server["args"][:2], ["-I", "-u"])
                 self.assertEqual(server["args"][-1], "--stdio")
+                self.assertEqual(
+                    server["env"]["CODEX_HOME"], case["codex_home"]
+                )
+                if case["platform"] == "windows":
+                    self.assertIn(
+                        r'"CODEX_HOME": "C:\\Users\\Ada\\.codex"',
+                        plan.mcp_json,
+                    )
 
     def test_mcp_render_uses_absolute_interpreter_and_server_path(self) -> None:
         payload = json.loads(
             render_mcp_json(
                 "/Users/ada/plugins/podotion-image",
+                codex_home="/Users/ada/.codex",
                 python_executable="/opt/homebrew/bin/python3",
                 platform="macos",
             )
@@ -196,6 +195,7 @@ class InstallPlanTests(unittest.TestCase):
                 "--stdio",
             ],
         )
+        self.assertEqual(server["env"], {"CODEX_HOME": "/Users/ada/.codex"})
         self.assertEqual(server["startup_timeout_sec"], 30)
         self.assertEqual(server["tool_timeout_sec"], 3600)
 
@@ -215,6 +215,10 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn("/mnt/c/Users/Ada/.codex/.podotion-image-runtimes/wsl", plan.platform_marker)
         server = json.loads(plan.mcp_json)["mcpServers"]["podotion-image"]
         self.assertEqual(server["command"], "/usr/bin/python3")
+        self.assertEqual(
+            server["env"],
+            {"CODEX_HOME": "/mnt/c/Users/Ada/.codex"},
+        )
 
     def test_windows_and_wsl_switch_keep_runtime_local_plugin_state(self) -> None:
         windows = build_install_plan(
@@ -260,6 +264,14 @@ class InstallPlanTests(unittest.TestCase):
             "/mnt/c/Users/Ada/.codex/.podotion-image-runtimes/wsl/"
             ".podotion-image-platform.json",
         )
+        windows_mcp = json.loads(windows.mcp_json)["mcpServers"]["podotion-image"]
+        wsl_mcp = json.loads(wsl.mcp_json)["mcpServers"]["podotion-image"]
+        self.assertEqual(
+            windows_mcp["env"], {"CODEX_HOME": r"C:\Users\Ada\.codex"}
+        )
+        self.assertEqual(
+            wsl_mcp["env"], {"CODEX_HOME": "/mnt/c/Users/Ada/.codex"}
+        )
 
     def test_marketplace_merge_preserves_order_and_interface(self) -> None:
         existing = {
@@ -300,7 +312,7 @@ class InstallTransactionTests(unittest.TestCase):
         (self.source / ".codex-plugin").mkdir(parents=True)
         (self.source / "mcp").mkdir(parents=True)
         (self.source / ".codex-plugin" / "plugin.json").write_text(
-            json.dumps({"name": "podotion-image", "version": "1.0.1"}) + "\n",
+            json.dumps({"name": "podotion-image", "version": "1.0.2"}) + "\n",
             encoding="utf-8",
         )
         (self.source / "mcp" / "server.py").write_text("# server\n", encoding="utf-8")
@@ -326,9 +338,14 @@ class InstallTransactionTests(unittest.TestCase):
 
     def test_success_commits_files_and_registers_codex(self) -> None:
         plan = self.plan()
-        legacy = Path(plan.legacy_skill)
-        legacy.mkdir(parents=True)
-        (legacy / "SKILL.md").write_text("legacy\n", encoding="utf-8")
+        standalone = Path(plan.codex_home) / "skills" / "podotion_image"
+        standalone_backup = Path(f"{standalone}.backup")
+        standalone.mkdir(parents=True)
+        standalone_backup.mkdir(parents=True)
+        (standalone / "SKILL.md").write_text("standalone\n", encoding="utf-8")
+        (standalone_backup / "SKILL.md").write_text(
+            "standalone backup\n", encoding="utf-8"
+        )
         provider = Path(plan.codex_home) / "podotion-image" / "provider.toml"
         provider.parent.mkdir(parents=True)
         provider.write_text("secret = true\n", encoding="utf-8")
@@ -349,24 +366,30 @@ class InstallTransactionTests(unittest.TestCase):
             mcp["mcpServers"]["podotion-image"]["command"],
             self.python_executable,
         )
+        self.assertEqual(
+            mcp["mcpServers"]["podotion-image"]["env"],
+            {"CODEX_HOME": plan.codex_home},
+        )
         source_manifest = json.loads(
             (self.source / ".codex-plugin" / "plugin.json").read_text()
         )
         installed_manifest = json.loads(
             (destination / ".codex-plugin" / "plugin.json").read_text()
         )
-        self.assertEqual(source_manifest["version"], "1.0.1")
+        self.assertEqual(source_manifest["version"], "1.0.2")
         self.assertRegex(
-            installed_manifest["version"], r"^1\.0\.1\+codex\.[0-9a-f]{12}$"
+            installed_manifest["version"], r"^1\.0\.2\+codex\.[0-9a-f]{12}$"
         )
         marketplace = json.loads(Path(result.marketplace_json).read_text())
         self.assertEqual(marketplace["plugins"][0]["name"], "podotion-image")
         marker = json.loads(Path(result.platform_marker).read_text())
         self.assertEqual(marker["platform"], self.platform.value)
-        self.assertTrue(result.legacy_retired)
-        self.assertFalse(Path(result.legacy_skill).exists())
         self.assertEqual(
-            (Path(result.legacy_backup) / "SKILL.md").read_text(), "legacy\n"
+            (standalone / "SKILL.md").read_text(), "standalone\n"
+        )
+        self.assertEqual(
+            (standalone_backup / "SKILL.md").read_text(),
+            "standalone backup\n",
         )
         self.assertEqual(provider.read_text(), "secret = true\n")
         self.assertEqual(generated_image.read_bytes(), b"png")
@@ -374,9 +397,6 @@ class InstallTransactionTests(unittest.TestCase):
 
     def test_fault_rolls_back_existing_plugin_and_marketplace(self) -> None:
         plan = self.plan()
-        legacy = Path(plan.legacy_skill)
-        legacy.mkdir(parents=True)
-        (legacy / "SKILL.md").write_text("legacy\n", encoding="utf-8")
         destination = Path(plan.plugin_destination)
         destination.mkdir(parents=True)
         (destination / "old.txt").write_text("old\n", encoding="utf-8")
@@ -402,14 +422,9 @@ class InstallTransactionTests(unittest.TestCase):
         self.assertFalse((destination / "content.txt").exists())
         self.assertEqual(marketplace.read_text(), old_text)
         self.assertFalse(Path(plan.platform_marker).exists())
-        self.assertEqual((legacy / "SKILL.md").read_text(), "legacy\n")
-        self.assertFalse(Path(plan.legacy_backup).exists())
 
     def test_codex_failure_rolls_back_a_fresh_install(self) -> None:
         plan = self.plan()
-        legacy = Path(plan.legacy_skill)
-        legacy.mkdir(parents=True)
-        (legacy / "SKILL.md").write_text("legacy\n", encoding="utf-8")
 
         def failed(_command):
             return SimpleNamespace(returncode=7)
@@ -419,51 +434,22 @@ class InstallTransactionTests(unittest.TestCase):
         self.assertFalse(Path(plan.plugin_destination).exists())
         self.assertFalse(Path(plan.marketplace_json).exists())
         self.assertFalse(Path(plan.platform_marker).exists())
-        self.assertEqual((legacy / "SKILL.md").read_text(), "legacy\n")
-        self.assertFalse(Path(plan.legacy_backup).exists())
 
-    def test_failure_after_legacy_move_restores_everything(self) -> None:
+    def test_existing_standalone_skill_and_backup_are_untouched(self) -> None:
         plan = self.plan()
-        legacy = Path(plan.legacy_skill)
-        legacy.mkdir(parents=True)
-        (legacy / "SKILL.md").write_text("legacy\n", encoding="utf-8")
-        commands: list[tuple[str, ...]] = []
-
-        def runner(command):
-            commands.append(tuple(command))
-            return SimpleNamespace(returncode=0)
-
-        def fault(step: str) -> None:
-            if step == "legacy_retired":
-                raise RuntimeError("failure after retirement")
-
-        with self.assertRaisesRegex(RuntimeError, "after retirement"):
-            execute_install_plan(
-                plan,
-                command_runner=runner,
-                fault_hook=fault,
-            )
-
-        self.assertEqual(commands, [plan.codex_command, plan.codex_rollback_command])
-        self.assertEqual((legacy / "SKILL.md").read_text(), "legacy\n")
-        self.assertFalse(Path(plan.legacy_backup).exists())
-        self.assertFalse(Path(plan.plugin_destination).exists())
-        self.assertFalse(Path(plan.marketplace_json).exists())
-        self.assertFalse(Path(plan.platform_marker).exists())
-
-    def test_existing_legacy_backup_is_never_overwritten(self) -> None:
-        plan = self.plan()
-        legacy = Path(plan.legacy_skill)
-        backup = Path(plan.legacy_backup)
-        legacy.mkdir(parents=True)
+        standalone = Path(plan.codex_home) / "skills" / "podotion_image"
+        backup = Path(f"{standalone}.backup")
+        standalone.mkdir(parents=True)
         backup.mkdir(parents=True)
-        (backup / "SKILL.md").write_text("older backup\n", encoding="utf-8")
+        (standalone / "SKILL.md").write_text("local development\n", encoding="utf-8")
+        (backup / "SKILL.md").write_text("local backup\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(InstallError, "legacy backup already exists"):
-            execute_install_plan(plan, run_codex=False)
+        execute_install_plan(plan, run_codex=False)
 
-        self.assertEqual((backup / "SKILL.md").read_text(), "older backup\n")
-        self.assertTrue(legacy.exists())
+        self.assertEqual(
+            (standalone / "SKILL.md").read_text(), "local development\n"
+        )
+        self.assertEqual((backup / "SKILL.md").read_text(), "local backup\n")
 
     def test_repeated_install_is_stable_and_content_change_updates_cachebuster(self) -> None:
         plan = self.plan()

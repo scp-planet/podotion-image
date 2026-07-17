@@ -1,6 +1,6 @@
 {
   "name": "podotion-image",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Generate and edit images through Podotion with durable MCP resources.",
   "author": {
     "name": "Podotion"

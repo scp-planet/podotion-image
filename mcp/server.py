@@ -546,6 +546,8 @@ class PodotionMCPServer:
         function = getattr(self.core, "get_request_status", None)
         if not callable(function):
             raise RuntimeError("installed executor does not support request status")
+        status_environ = dict(os.environ)
+        status_environ["CODEX_THREAD_ID"] = state_scope
         result = _call_compatible(
             function,
             {
@@ -553,7 +555,7 @@ class PodotionMCPServer:
                 "state_scope": state_scope,
                 "scope": state_scope,
                 "output_dir": resolved_output,
-                "environ": {"CODEX_THREAD_ID": state_scope},
+                "environ": status_environ,
             },
         )
         if not isinstance(result, dict):

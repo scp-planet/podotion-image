@@ -74,8 +74,6 @@ class InstallPlan:
     plugin_destination: str
     codex_home: str
     platform_marker: str
-    legacy_skill: str
-    legacy_backup: str
     marketplace_json: str
     marketplace_name: str
     mcp_json: str
@@ -96,9 +94,6 @@ class InstallResult:
     plugin_destination: str
     marketplace_json: str
     platform_marker: str
-    legacy_skill: str
-    legacy_backup: str
-    legacy_retired: bool
     codex_registered: bool
 
 
@@ -163,8 +158,8 @@ def _reject_shared_codex_home(codex_home: str, kind: PlatformKind) -> None:
 
     if kind is PlatformKind.WSL and is_wsl_windows_mount(codex_home):
         # Codex Desktop may intentionally pass the Windows profile into a WSL
-        # runtime. This path is accepted; platform_marker_path() and
-        # legacy_skill_paths() isolate the WSL-owned state below it.
+        # runtime. This path is accepted; platform_marker_path() isolates the
+        # WSL-owned installer state below it.
         return
 
     if is_windows_absolute(codex_home) or is_wsl_windows_mount(codex_home):
@@ -181,14 +176,6 @@ def platform_marker_path(codex_home: str, kind: PlatformKind) -> str:
             kind, codex_home, RUNTIME_DIRECTORY, kind.value, PLATFORM_MARKER
         )
     return _join(kind, codex_home, PLATFORM_MARKER)
-
-
-def legacy_skill_paths(codex_home: str, kind: PlatformKind) -> tuple[str, str]:
-    # Skills under a shared CODEX_HOME are shared by Windows and WSL too. Once
-    # the plugin is registered, keeping the legacy skill would leave two
-    # competing `podotion-image` workflows and could bypass MCP Outputs.
-    legacy = _join(kind, codex_home, "skills", "podotion_image")
-    return legacy, f"{legacy}.backup"
 
 
 def _load_platform_marker(path: Path) -> dict[str, object] | None:
@@ -323,6 +310,7 @@ def merge_marketplace(
 def build_mcp_payload(
     plugin_root: str | os.PathLike[str],
     *,
+    codex_home: str | os.PathLike[str],
     python_executable: str | os.PathLike[str] | None = None,
     platform: str | PlatformKind | None = None,
     environ: Mapping[str, str] | None = None,
@@ -334,12 +322,16 @@ def build_mcp_payload(
     root = resolve_workspace_path(plugin_root, platform=kind, environ=environ)
     executable = os.fspath(python_executable or sys.executable)
     executable = resolve_workspace_path(executable, platform=kind, environ=environ)
+    resolved_codex_home = resolve_workspace_path(
+        codex_home, platform=kind, environ=environ
+    )
     server_path = _join(kind, root, "mcp", "server.py")
     return {
         "mcpServers": {
             PLUGIN_NAME: {
                 "command": executable,
                 "args": ["-I", "-u", server_path, "--stdio"],
+                "env": {"CODEX_HOME": resolved_codex_home},
                 "startup_timeout_sec": 30,
                 "tool_timeout_sec": 3600,
             }
@@ -350,6 +342,7 @@ def build_mcp_payload(
 def render_mcp_json(
     plugin_root: str | os.PathLike[str],
     *,
+    codex_home: str | os.PathLike[str],
     python_executable: str | os.PathLike[str] | None = None,
     platform: str | PlatformKind | None = None,
     environ: Mapping[str, str] | None = None,
@@ -357,6 +350,7 @@ def render_mcp_json(
 ) -> str:
     payload = build_mcp_payload(
         plugin_root,
+        codex_home=codex_home,
         python_executable=python_executable,
         platform=platform,
         environ=environ,
@@ -426,19 +420,18 @@ def build_install_plan(
     )
     mcp_json = render_mcp_json(
         destination,
+        codex_home=codex_home,
         python_executable=executable,
         platform=kind,
         environ=env,
     )
     marker = platform_marker_path(codex_home, kind)
-    legacy_skill, legacy_backup = legacy_skill_paths(codex_home, kind)
     operations = (
         InstallOperation("copy_plugin", destination, source),
         InstallOperation("render_mcp_json", _join(kind, destination, ".mcp.json")),
         InstallOperation("update_marketplace", marketplace_json),
         InstallOperation("claim_codex_home", marker),
         InstallOperation("register_plugin", f"{PLUGIN_NAME}@{marketplace_name}"),
-        InstallOperation("retire_legacy_skill", legacy_backup, legacy_skill),
     )
     return InstallPlan(
         platform=kind,
@@ -446,8 +439,6 @@ def build_install_plan(
         plugin_destination=destination,
         codex_home=codex_home,
         platform_marker=marker,
-        legacy_skill=legacy_skill,
-        legacy_backup=legacy_backup,
         marketplace_json=marketplace_json,
         marketplace_name=marketplace_name,
         mcp_json=mcp_json,
@@ -615,8 +606,6 @@ def execute_install_plan(
     destination = Path(plan.plugin_destination)
     marketplace_path = Path(plan.marketplace_json)
     marker_path = Path(plan.platform_marker)
-    legacy_skill = Path(plan.legacy_skill)
-    legacy_backup = Path(plan.legacy_backup)
     if not source.is_dir():
         raise InstallError(f"plugin source does not exist: {source}")
     try:
@@ -626,13 +615,6 @@ def execute_install_plan(
         pass
 
     validate_codex_home_owner(plan.codex_home, plan.platform)
-    if (legacy_skill.exists() or legacy_skill.is_symlink()) and (
-        legacy_backup.exists() or legacy_backup.is_symlink()
-    ):
-        raise InstallError(
-            f"legacy backup already exists; preserve or move it before installing: "
-            f"{legacy_backup}"
-        )
     existing_marketplace: Mapping[str, object] | None = None
     if marketplace_path.exists():
         try:
@@ -659,7 +641,6 @@ def execute_install_plan(
     installed_destination = False
     installed_marketplace = False
     installed_marker = False
-    legacy_retired = False
     codex_registered = False
 
     try:
@@ -713,26 +694,8 @@ def execute_install_plan(
             codex_registered = True
             if fault_hook:
                 fault_hook("codex_registered")
-
-            if legacy_skill.exists() or legacy_skill.is_symlink():
-                legacy_backup.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(legacy_skill, legacy_backup)
-                legacy_retired = True
-                if fault_hook:
-                    fault_hook("legacy_retired")
     except BaseException as exc:
         rollback_error: BaseException | None = None
-        if legacy_retired:
-            try:
-                if legacy_skill.exists() or legacy_skill.is_symlink():
-                    raise InstallError(
-                        f"cannot restore legacy skill because its path is occupied: "
-                        f"{legacy_skill}"
-                    )
-                os.replace(legacy_backup, legacy_skill)
-                legacy_retired = False
-            except BaseException as restore_exc:
-                rollback_error = restore_exc
         if codex_registered:
             try:
                 _run_codex(plan.codex_rollback_command, command_runner)
@@ -763,9 +726,6 @@ def execute_install_plan(
         plugin_destination=str(destination),
         marketplace_json=str(marketplace_path),
         platform_marker=str(marker_path),
-        legacy_skill=str(legacy_skill),
-        legacy_backup=str(legacy_backup),
-        legacy_retired=legacy_retired,
         codex_registered=codex_registered,
     )
 
