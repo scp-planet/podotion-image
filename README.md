@@ -51,7 +51,7 @@ py -3 scripts\install.py --dry-run
 py -3 scripts\install.py
 ```
 
-安装器会把 Plugin 源码安装到当前运行时的 `~/plugins/podotion-image`，维护 `~/.agents/plugins/marketplace.json`，并注册 `podotion-image@personal`。安装和更新不会读取、移动或删除 `$CODEX_HOME/skills` 中的 standalone Skill。
+安装器会把 Plugin 源码安装到当前运行时的 `~/plugins/podotion-image`，维护 `~/.agents/plugins/marketplace.json`，并注册 `podotion-image@personal`。
 
 手动配置凭据和运行不计费检查：
 
@@ -143,28 +143,6 @@ codex plugin remove podotion-image@personal
 ```
 
 然后从当前运行时的 `~/.agents/plugins/marketplace.json` 中删除 `podotion-image` 条目，并删除 `~/plugins/podotion-image`。凭据不会随 Plugin 卸载自动删除；仅在确认不再使用时手动删除 `$CODEX_HOME/podotion-image/provider.toml`。共享 `CODEX_HOME` 时，删除凭据会同时影响 Windows 和 WSL。
-
-### 手动移除 standalone Skill
-
-standalone Skill 不属于 Plugin 安装器的生命周期。仅在确认本机还残留开发版 standalone Skill 时手动删除。
-
-WSL、macOS 或 Linux：
-
-```bash
-rm -rf -- \
-  "${CODEX_HOME:-$HOME/.codex}/skills/podotion_image" \
-  "${CODEX_HOME:-$HOME/.codex}/skills/podotion_image.backup"
-```
-
-Windows PowerShell：
-
-```powershell
-$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
-Remove-Item -LiteralPath (Join-Path $codexHome "skills\podotion_image") -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $codexHome "skills\podotion_image.backup") -Recurse -Force -ErrorAction SilentlyContinue
-```
-
-这些命令不会删除 Plugin、个人 Marketplace、已生成图片或 `$CODEX_HOME/podotion-image/provider.toml`。执行后重启 Codex App 并新建任务，确认技能列表中只保留 `podotion-image:podotion-image`。
 
 ## 开发、测试与发布
 

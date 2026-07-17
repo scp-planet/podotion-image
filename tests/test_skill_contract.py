@@ -28,7 +28,7 @@ class SkillContractTests(unittest.TestCase):
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("images[].markdown_path", skill)
-        self.assertIn("standalone absolute-path file link", skill)
+        self.assertIn("separate absolute-path file link", skill)
         self.assertIn("outputs_registered", skill)
         self.assertIn("expect `resource_uri` only when registration succeeded", skill)
         self.assertIn("registration fails completely", skill)

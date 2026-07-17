@@ -12,7 +12,7 @@
         "Sends at most one upstream POST for the user action",
         "Uses the fixed Podotion Images API endpoint without a provider or Responses fallback",
         "The outgoing image request uses gpt-image-2 instead of the conversation text model",
-        "The final assistant response embeds the generated local image and includes a standalone absolute-path file link",
+        "The final assistant response embeds the generated local image and includes a separate absolute-path file link",
         "Uses the active workspace PodotionImage directory when the user did not request another location",
         "Returns standard MCP image and resource_link content without another provider request",
         "Unrelated time-conversation text is absent from the image prompt"
@@ -28,7 +28,7 @@
         "Reuses the same state_scope and supplies a new stable request_key for the edit action",
         "Carries the source image into the request as a multipart image[] part",
         "Preserves the requested composition constraint in the edit prompt",
-        "Embeds the edited image and includes a standalone file link in the current response"
+        "Embeds the edited image and includes a separate file link in the current response"
       ]
     },
     {
@@ -125,7 +125,7 @@
       "expectations": [
         "Preserves and normalizes the explicit absolute output directory",
         "Keeps the successfully saved PNG when host output registration fails",
-        "Provides both an inline preview and a standalone file link",
+        "Provides both an inline preview and a separate file link",
         "Does not retry generate or edit to recover an Outputs registration failure"
       ]
     },

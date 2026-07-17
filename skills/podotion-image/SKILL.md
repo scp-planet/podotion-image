@@ -54,7 +54,7 @@ After a successful tool result:
 
 1. Keep each available MCP `resource_link` as a durable output resource.
 2. Embed each returned `images[].markdown_path` in the response.
-3. Add a standalone absolute-path file link for each PNG.
+3. Add a separate absolute-path file link for each PNG.
 4. Report structured warnings without turning `ok: true` into a failure.
 
 Treat every image independently. Use `outputs_registered` to distinguish a registered resource from a saved-only image, and expect `resource_uri` only when registration succeeded. If registry persistence fails, keep the in-process `image` and `resource_link`. If registration fails completely, keep the returned inline `image`, native absolute path, preview, and file link. Report the structured warning without changing `ok: true`. If the App still does not place a valid MCP resource in the Outputs panel, retain the saved file and links and report the host limitation. Do not call `generate` or `edit` again. `publish_existing_image` may republish an existing PNG without contacting Podotion.

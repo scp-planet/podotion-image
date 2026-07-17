@@ -338,14 +338,6 @@ class InstallTransactionTests(unittest.TestCase):
 
     def test_success_commits_files_and_registers_codex(self) -> None:
         plan = self.plan()
-        standalone = Path(plan.codex_home) / "skills" / "podotion_image"
-        standalone_backup = Path(f"{standalone}.backup")
-        standalone.mkdir(parents=True)
-        standalone_backup.mkdir(parents=True)
-        (standalone / "SKILL.md").write_text("standalone\n", encoding="utf-8")
-        (standalone_backup / "SKILL.md").write_text(
-            "standalone backup\n", encoding="utf-8"
-        )
         provider = Path(plan.codex_home) / "podotion-image" / "provider.toml"
         provider.parent.mkdir(parents=True)
         provider.write_text("secret = true\n", encoding="utf-8")
@@ -384,13 +376,6 @@ class InstallTransactionTests(unittest.TestCase):
         self.assertEqual(marketplace["plugins"][0]["name"], "podotion-image")
         marker = json.loads(Path(result.platform_marker).read_text())
         self.assertEqual(marker["platform"], self.platform.value)
-        self.assertEqual(
-            (standalone / "SKILL.md").read_text(), "standalone\n"
-        )
-        self.assertEqual(
-            (standalone_backup / "SKILL.md").read_text(),
-            "standalone backup\n",
-        )
         self.assertEqual(provider.read_text(), "secret = true\n")
         self.assertEqual(generated_image.read_bytes(), b"png")
         self.assertEqual(commands, [plan.codex_command])
@@ -434,22 +419,6 @@ class InstallTransactionTests(unittest.TestCase):
         self.assertFalse(Path(plan.plugin_destination).exists())
         self.assertFalse(Path(plan.marketplace_json).exists())
         self.assertFalse(Path(plan.platform_marker).exists())
-
-    def test_existing_standalone_skill_and_backup_are_untouched(self) -> None:
-        plan = self.plan()
-        standalone = Path(plan.codex_home) / "skills" / "podotion_image"
-        backup = Path(f"{standalone}.backup")
-        standalone.mkdir(parents=True)
-        backup.mkdir(parents=True)
-        (standalone / "SKILL.md").write_text("local development\n", encoding="utf-8")
-        (backup / "SKILL.md").write_text("local backup\n", encoding="utf-8")
-
-        execute_install_plan(plan, run_codex=False)
-
-        self.assertEqual(
-            (standalone / "SKILL.md").read_text(), "local development\n"
-        )
-        self.assertEqual((backup / "SKILL.md").read_text(), "local backup\n")
 
     def test_repeated_install_is_stable_and_content_change_updates_cachebuster(self) -> None:
         plan = self.plan()
