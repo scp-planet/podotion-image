@@ -26,7 +26,7 @@ Windows、WSL、macOS 和 Linux 都使用安装时当前运行时的原生 Pytho
 将下方整段提示词发给 Codex。它同时适用于首次安装和更新；安装器会以事务方式替换个人 Plugin，并在失败时回滚。
 
 ```text
-请从 https://github.com/scp-planet/podotionImage.git 安装或更新 podotion-image Plugin。我的 PodotionImageSk 是 {{PodotionImageSk}}。
+请从 https://github.com/scp-planet/podotion-image.git 安装或更新 podotion-image Plugin。我的 PodotionImageSk 是 {{PodotionImageSk}}。
 
 请在当前 Codex 运行时内执行：将仓库浅克隆到权限受限的随机临时目录，确认 origin 与上述 GitHub 地址一致，并校验 .codex-plugin/plugin.json、.mcp.json、skills/podotion-image/SKILL.md、mcp/server.py、scripts/install.py 和生图执行器都存在。先运行 scripts/install.py --dry-run 并检查计划，再执行正式安装。通过标准输入将密钥传给安装后的 configure_direct.py --stdin --force；不得把密钥放入命令行参数、环境变量、日志、仓库或回复内容。然后运行不计费的 doctor 检查，不得运行 --image-probe。成功后删除临时克隆，告知我安装目录、配置路径和检查结果，但不得显示密钥。如果远程仓库不可访问或校验失败，立即停止，不得改用未经校验的其他来源。
 ```
