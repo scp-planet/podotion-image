@@ -26,18 +26,11 @@ Windows、WSL、macOS 和 Linux 都使用安装时当前运行时的原生 Pytho
 将下方整段提示词发给 Codex。它同时适用于首次安装和更新；安装器会以事务方式替换个人 Plugin，并在失败时回滚。Codex Desktop 任务须先开启完全访问权限；Codex CLI 则须使用对当前用户目录具有等效写权限的运行账户。
 
 ```text
-请从 https://github.com/scp-planet/podotion-image.git 安装或更新 podotion-image Plugin。我的 PodotionImageSk 是 {{PodotionImageSk}}。
+请在当前原生运行时中，从 https://github.com/scp-planet/podotion-image.git 安装或更新 podotion-image Plugin。我的 PodotionImageSk 是 {{PodotionImageSk}}。
 
-前置条件：开始前确认当前运行时可访问 GitHub，且具备对以下当前用户目录的写权限：`~/plugins/podotion-image`、`~/.agents/plugins/marketplace.json` 和 `$CODEX_HOME`。在 Codex Desktop 中，这要求任务已开启完全访问权限；若当前仍是仅工作区写入的沙箱，先要求我重新以完全访问权限启动任务并停止，不得开始 clone。不得用 `--home`、`--codex-home`、`--no-codex` 或工作区替代这些目标目录。
+这是包含 Skill 和 MCP 的 Plugin，不使用 skill-installer。请确保任务可联网并可写当前用户目录；CODEX_HOME 未设置时使用当前平台默认值，不做额外写权限探针。浅克隆仓库；仅在原生 Windows 遇到 Schannel 错误时，使用单命令 `git -c http.sslBackend=openssl` 重试。然后使用当前平台原生 Python 依次执行 `scripts/install.py --dry-run` 和 `scripts/install.py`：Windows 使用 `py -3`，macOS、Linux 和 WSL 使用 `python3`。
 
-请在当前 Codex 运行时内执行以下步骤：
-1. 创建权限受限的随机临时目录，使用当前运行时的原生 Git 执行：git clone --depth 1 https://github.com/scp-planet/podotion-image.git <clone-dir>。
-2. 仅在原生 Windows 中，且首次 clone 错误同时包含 schannel、AcquireCredentialsHandle failed 和 SEC_E_NO_CREDENTIALS 时，新建另一个权限受限的随机临时目录，对同一 GitHub URL 只重试一次：git -c http.sslBackend=openssl clone --depth 1 https://github.com/scp-planet/podotion-image.git <new-clone-dir>。这是唯一允许的下载降级；不得执行 git config --global 或 --system，不得设置 http.sslVerify=false，不得改用代理、镜像、归档下载、附件或 WSL。错误类型不同或该次重试仍失败时立即停止。
-3. clone 成功后确认退出状态为 0、origin 严格等于上述 GitHub 地址且 git rev-parse --is-shallow-repository 返回 true。仅当这些检查通过时，无法读取全局 excludesfile 的警告可以忽略。校验 .codex-plugin/plugin.json、.mcp.json、skills/podotion-image/SKILL.md、mcp/server.py、scripts/install.py 和生图执行器都存在。
-4. 先运行 scripts/install.py --dry-run 并检查计划，再在同一完全访问权限范围内执行正式安装。正式安装必须保留 `codex plugin add podotion-image@personal` 注册步骤；不得跳过注册或改写 Marketplace 文件。通过标准输入将上述密钥传给安装后的 configure_direct.py --stdin --force；不得把密钥放入命令行参数、环境变量、日志、仓库或回复内容。
-5. 运行不计费的 doctor 检查，不得运行 --image-probe。成功后删除本次创建的所有临时目录，告知我安装目录、配置路径和检查结果，但不得显示密钥。
-
-如果无法满足前置权限、远程仓库在上述唯一一次受限重试后仍不可访问，或任一来源、文件、安装计划或正式安装失败，立即停止，不得改用未经校验的其他来源或替代安装路径。
+安装后，将上述 SK 仅通过安装后的 `configure_direct.py --stdin --force` 标准输入配置，并运行不计费的 `doctor`；不得运行 `--image-probe`。最后报告脱敏结果，并提示我重启 Codex、新建任务。
 ```
 
 安装或更新完成后，新建一个 Codex 任务，使 Plugin Skill 和 MCP server 按新配置加载。

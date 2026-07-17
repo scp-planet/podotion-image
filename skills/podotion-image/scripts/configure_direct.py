@@ -36,6 +36,8 @@ def validate_secret(value: str) -> str:
     secret = value.strip()
     if not secret:
         raise ValueError("PodotionImageSk cannot be empty")
+    if secret.startswith("{{") and secret.endswith("}}"):
+        raise ValueError("PodotionImageSk must replace the entire placeholder without braces")
     if secret == runtime.DIRECT_SECRET_PLACEHOLDER or "PODOTION_IMAGE_SK" in secret.upper():
         raise ValueError("PodotionImageSk placeholder has not been replaced")
     if "\r" in secret or "\n" in secret:

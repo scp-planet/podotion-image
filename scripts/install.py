@@ -37,6 +37,7 @@ MARKETPLACE_SOURCE = f"./plugins/{PLUGIN_NAME}"
 PLATFORM_MARKER = ".podotion-image-platform.json"
 RUNTIME_DIRECTORY = ".podotion-image-runtimes"
 PLUGIN_MANIFEST = ".codex-plugin/plugin.json"
+MINIMUM_PYTHON = (3, 11)
 _SEMVER_RE = re.compile(
     r"^(?P<core>"
     r"(?:0|[1-9][0-9]*)\."
@@ -58,6 +59,14 @@ class SharedCodexHomeError(InstallError):
 
 class MarketplaceConflictError(InstallError):
     """Raised when an existing marketplace entry points to another source."""
+
+
+class CodexCliNotFoundError(InstallError):
+    """Raised when the native Codex CLI cannot be resolved safely."""
+
+
+class UnsupportedPythonError(InstallError):
+    """Raised when the installer is running on an unsupported Python."""
 
 
 @dataclass(frozen=True)
@@ -86,6 +95,7 @@ class InstallPlan:
         payload = asdict(self)
         payload["platform"] = self.platform.value
         payload["codex_command"] = list(self.codex_command)
+        payload["codex_rollback_command"] = list(self.codex_rollback_command)
         return payload
 
 
@@ -99,6 +109,20 @@ class InstallResult:
 
 CommandRunner = Callable[[Sequence[str]], object]
 FaultHook = Callable[[str], None]
+
+
+def validate_python_version(
+    version_info: Sequence[int] | None = None,
+) -> None:
+    """Require the Python runtime supported by the plugin."""
+
+    version = tuple((version_info or sys.version_info)[:2])
+    if version < MINIMUM_PYTHON:
+        required = ".".join(str(part) for part in MINIMUM_PYTHON)
+        actual = ".".join(str(part) for part in version)
+        raise UnsupportedPythonError(
+            f"Python {required} or newer is required; found Python {actual}"
+        )
 
 
 def _path_module(kind: PlatformKind):
@@ -119,6 +143,38 @@ def _environment_value(
         if candidate.casefold() == wanted:
             return value
     return None
+
+
+def resolve_codex_cli(
+    *,
+    platform: str | PlatformKind | None = None,
+    environ: Mapping[str, str] | None = None,
+    os_release: str | None = None,
+) -> str:
+    """Resolve an executable native Codex CLI without selecting npm shims."""
+
+    env = os.environ if environ is None else environ
+    kind = detect_platform(platform, environ=env, os_release=os_release)
+    search_path = _environment_value(env, "PATH", kind)
+    candidates = ("codex.cmd", "codex.exe") if kind is PlatformKind.WINDOWS else ("codex",)
+    path_module = _path_module(kind)
+    for candidate in candidates:
+        resolved = shutil.which(candidate, path=search_path)
+        if not resolved:
+            continue
+        normalized = path_module.normpath(resolved)
+        if not path_module.isabs(normalized):
+            normalized = path_module.abspath(normalized)
+        if kind is PlatformKind.WINDOWS:
+            extension = path_module.splitext(normalized)[1].casefold()
+            if extension not in {".exe", ".cmd"}:
+                continue
+        return normalized
+
+    expected = "codex.cmd or codex.exe" if kind is PlatformKind.WINDOWS else "codex"
+    raise CodexCliNotFoundError(
+        f"cannot find the native Codex CLI ({expected}) on PATH"
+    )
 
 
 def detect_user_home(
@@ -384,6 +440,7 @@ def build_install_plan(
     environ: Mapping[str, str] | None = None,
     home: str | os.PathLike[str] | None = None,
     python_executable: str | os.PathLike[str] | None = None,
+    codex_executable: str | os.PathLike[str] | None = None,
     os_release: str | None = None,
     existing_marketplace: Mapping[str, object] | None = None,
     check_marker: bool = True,
@@ -418,6 +475,22 @@ def build_install_plan(
     executable = resolve_workspace_path(
         os.fspath(python_executable or sys.executable), platform=kind, environ=env
     )
+    if codex_executable is None:
+        codex_cli = resolve_codex_cli(
+            platform=kind,
+            environ=env,
+            os_release=os_release,
+        )
+    else:
+        codex_cli = resolve_workspace_path(
+            codex_executable, platform=kind, environ=env
+        )
+        if kind is PlatformKind.WINDOWS:
+            extension = ntpath.splitext(codex_cli)[1].casefold()
+            if extension not in {".exe", ".cmd"}:
+                raise InstallError(
+                    "Windows Codex CLI must be codex.exe or codex.cmd"
+                )
     mcp_json = render_mcp_json(
         destination,
         codex_home=codex_home,
@@ -443,9 +516,9 @@ def build_install_plan(
         marketplace_name=marketplace_name,
         mcp_json=mcp_json,
         python_executable=executable,
-        codex_command=("codex", "plugin", "add", f"{PLUGIN_NAME}@{marketplace_name}"),
+        codex_command=(codex_cli, "plugin", "add", f"{PLUGIN_NAME}@{marketplace_name}"),
         codex_rollback_command=(
-            "codex",
+            codex_cli,
             "plugin",
             "remove",
             f"{PLUGIN_NAME}@{marketplace_name}",
@@ -573,18 +646,43 @@ def apply_manifest_cachebuster(plugin_root: Path) -> str:
 
 
 def _run_codex(command: Sequence[str], runner: CommandRunner | None) -> None:
+    def diagnostic(value: object) -> str:
+        text = " ".join(str(value or "").split())
+        text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", text)
+        text = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]+", "[REDACTED]", text)
+        text = re.sub(
+            r"(?i)(PodotionImageSk\s*[=:]\s*)\S+",
+            r"\1[REDACTED]",
+            text,
+        )
+        return text[:500]
+
     try:
         if runner is None:
-            completed = subprocess.run(command, check=True)
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
         else:
             completed = runner(command)
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        raise InstallError("Codex rejected the plugin registration") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = diagnostic(exc.stderr)
+        message = f"Codex plugin registration exited with status {exc.returncode}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise InstallError(message) from exc
+    except OSError as exc:
+        reason = diagnostic(exc.strerror or type(exc).__name__)
+        raise InstallError(f"cannot execute Codex CLI: {reason}") from exc
     return_code = getattr(completed, "returncode", 0)
     if return_code:
-        raise InstallError(
-            f"Codex plugin registration exited with status {return_code}"
-        )
+        detail = diagnostic(getattr(completed, "stderr", ""))
+        message = f"Codex plugin registration exited with status {return_code}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise InstallError(message)
 
 
 def execute_install_plan(
@@ -754,6 +852,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.codex_home:
         env["CODEX_HOME"] = args.codex_home
     try:
+        validate_python_version()
         plan = build_install_plan(args.plugin_root, environ=env, home=args.home)
         if args.dry_run:
             print(json.dumps(plan.as_dict(), indent=2, ensure_ascii=False))

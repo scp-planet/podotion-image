@@ -12,6 +12,7 @@ from unittest import mock
 
 from podotion_image.paths import PlatformKind, detect_platform
 from scripts.install import (
+    CodexCliNotFoundError,
     InstallError,
     MarketplaceConflictError,
     SharedCodexHomeError,
@@ -22,6 +23,8 @@ from scripts.install import (
     main,
     merge_marketplace,
     render_mcp_json,
+    resolve_codex_cli,
+    validate_python_version,
     validate_codex_home_owner,
 )
 
@@ -116,6 +119,7 @@ class InstallPlanTests(unittest.TestCase):
                 "python": r"C:\Python314\python.exe",
                 "destination": r"C:\Users\Ada\plugins\podotion-image",
                 "codex_home": r"C:\Users\Ada\.codex",
+                "codex": r"C:\Tools\codex.cmd",
             },
             {
                 "platform": "wsl",
@@ -124,6 +128,7 @@ class InstallPlanTests(unittest.TestCase):
                 "python": "/usr/bin/python3",
                 "destination": "/home/ada/plugins/podotion-image",
                 "codex_home": "/home/ada/.codex",
+                "codex": "/usr/local/bin/codex",
             },
             {
                 "platform": "macos",
@@ -132,6 +137,7 @@ class InstallPlanTests(unittest.TestCase):
                 "python": "/opt/homebrew/bin/python3",
                 "destination": "/Users/ada/plugins/podotion-image",
                 "codex_home": "/Users/ada/.codex",
+                "codex": "/opt/homebrew/bin/codex",
             },
             {
                 "platform": "linux",
@@ -140,6 +146,7 @@ class InstallPlanTests(unittest.TestCase):
                 "python": "/usr/bin/python3",
                 "destination": "/home/ada/plugins/podotion-image",
                 "codex_home": "/home/ada/.codex",
+                "codex": "/usr/local/bin/codex",
             },
         )
         for case in cases:
@@ -149,17 +156,18 @@ class InstallPlanTests(unittest.TestCase):
                     platform=case["platform"],
                     environ=case["env"],
                     python_executable=case["python"],
+                    codex_executable=case["codex"],
                     check_marker=False,
                 )
                 self.assertEqual(plan.plugin_destination, case["destination"])
                 self.assertEqual(plan.codex_home, case["codex_home"])
                 self.assertEqual(
                     plan.codex_command,
-                    ("codex", "plugin", "add", "podotion-image@personal"),
+                    (case["codex"], "plugin", "add", "podotion-image@personal"),
                 )
                 self.assertEqual(
                     plan.codex_rollback_command,
-                    ("codex", "plugin", "remove", "podotion-image@personal"),
+                    (case["codex"], "plugin", "remove", "podotion-image@personal"),
                 )
                 config = json.loads(plan.mcp_json)
                 server = config["mcpServers"]["podotion-image"]
@@ -208,6 +216,7 @@ class InstallPlanTests(unittest.TestCase):
                 "CODEX_HOME": "/mnt/c/Users/Ada/.codex",
             },
             python_executable="/usr/bin/python3",
+            codex_executable="/usr/local/bin/codex",
             check_marker=False,
         )
         self.assertEqual(plan.plugin_destination, "/home/ada/plugins/podotion-image")
@@ -230,6 +239,7 @@ class InstallPlanTests(unittest.TestCase):
                 "CODEX_HOME": r"C:\Users\Ada\.codex",
             },
             python_executable=r"C:\Python314\python.exe",
+            codex_executable=r"C:\Tools\codex.cmd",
             check_marker=False,
         )
         wsl = build_install_plan(
@@ -241,6 +251,7 @@ class InstallPlanTests(unittest.TestCase):
                 "CODEX_HOME": "/mnt/c/Users/Ada/.codex",
             },
             python_executable="/usr/bin/python3",
+            codex_executable="/usr/local/bin/codex",
             check_marker=False,
         )
 
@@ -322,6 +333,11 @@ class InstallTransactionTests(unittest.TestCase):
         if self.platform is PlatformKind.WINDOWS:
             self.env = {"USERPROFILE": str(self.home)}
         self.python_executable = str(Path(sys.executable).resolve())
+        self.codex_executable = (
+            r"C:\Tools\codex.cmd"
+            if self.platform is PlatformKind.WINDOWS
+            else "/usr/local/bin/codex"
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -333,6 +349,7 @@ class InstallTransactionTests(unittest.TestCase):
             environ=self.env,
             home=str(self.home),
             python_executable=self.python_executable,
+            codex_executable=self.codex_executable,
             check_marker=False,
         )
 
@@ -420,6 +437,40 @@ class InstallTransactionTests(unittest.TestCase):
         self.assertFalse(Path(plan.marketplace_json).exists())
         self.assertFalse(Path(plan.platform_marker).exists())
 
+    def test_codex_permission_error_rolls_back_an_existing_install(self) -> None:
+        plan = self.plan()
+        destination = Path(plan.plugin_destination)
+        destination.mkdir(parents=True)
+        (destination / "old.txt").write_text("old\n", encoding="utf-8")
+
+        def denied(_command):
+            raise PermissionError(13, "permission denied")
+
+        with self.assertRaisesRegex(InstallError, "cannot execute Codex CLI"):
+            execute_install_plan(plan, command_runner=denied)
+        self.assertEqual((destination / "old.txt").read_text(), "old\n")
+        self.assertFalse((destination / "content.txt").exists())
+        self.assertFalse(Path(plan.marketplace_json).exists())
+        self.assertFalse(Path(plan.platform_marker).exists())
+
+    def test_codex_failure_redacts_stderr_and_rolls_back(self) -> None:
+        plan = self.plan()
+        secret = "sk-do-not-print-this"
+
+        def failed(_command):
+            return SimpleNamespace(
+                returncode=9,
+                stderr=f"Authorization: Bearer {secret}",
+            )
+
+        with self.assertRaises(InstallError) as raised:
+            execute_install_plan(plan, command_runner=failed)
+        message = str(raised.exception)
+        self.assertIn("status 9", message)
+        self.assertNotIn(secret, message)
+        self.assertIn("[REDACTED]", message)
+        self.assertFalse(Path(plan.plugin_destination).exists())
+
     def test_repeated_install_is_stable_and_content_change_updates_cachebuster(self) -> None:
         plan = self.plan()
         first = execute_install_plan(plan, run_codex=False)
@@ -472,8 +523,102 @@ class ManifestCachebusterTests(unittest.TestCase):
             with self.assertRaisesRegex(InstallError, "invalid SemVer"):
                 apply_manifest_cachebuster(root)
 
+    def test_windows_and_wsl_mcp_paths_produce_distinct_cachebusters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            versions = []
+            configs = (
+                render_mcp_json(
+                    r"C:\Users\Ada\plugins\podotion-image",
+                    codex_home=r"C:\Users\Ada\.codex",
+                    python_executable=r"C:\Python314\python.exe",
+                    platform="windows",
+                ),
+                render_mcp_json(
+                    "/home/ada/plugins/podotion-image",
+                    codex_home="/mnt/c/Users/Ada/.codex",
+                    python_executable="/usr/bin/python3",
+                    platform="wsl",
+                ),
+            )
+            for index, config in enumerate(configs):
+                root = Path(temporary) / str(index)
+                manifest = root / ".codex-plugin" / "plugin.json"
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text(
+                    json.dumps({"name": "podotion-image", "version": "1.0.2"}),
+                    encoding="utf-8",
+                )
+                (root / ".mcp.json").write_text(config, encoding="utf-8")
+                versions.append(apply_manifest_cachebuster(root))
+            self.assertNotEqual(versions[0], versions[1])
+
+
+class CodexCliResolutionTests(unittest.TestCase):
+    def test_windows_prefers_cmd_over_exe(self) -> None:
+        with mock.patch(
+            "scripts.install.shutil.which",
+            side_effect=lambda name, path=None: {
+                "codex.exe": r"C:\Program Files\Codex\codex.exe",
+                "codex.cmd": r"C:\Users\Ada\npm\codex.cmd",
+            }.get(name),
+        ) as which:
+            resolved = resolve_codex_cli(
+                platform="windows",
+                environ={"PATH": r"C:\Tools"},
+            )
+        self.assertEqual(resolved, r"C:\Users\Ada\npm\codex.cmd")
+        which.assert_called_once_with("codex.cmd", path=r"C:\Tools")
+
+    def test_windows_falls_back_to_exe_and_never_tries_bare_shim(self) -> None:
+        calls = []
+
+        def which(name, path=None):
+            calls.append(name)
+            return r"C:\Program Files\Codex\codex.exe" if name == "codex.exe" else None
+
+        with mock.patch("scripts.install.shutil.which", side_effect=which):
+            resolved = resolve_codex_cli(platform="windows", environ={"PATH": "x"})
+        self.assertEqual(resolved, r"C:\Program Files\Codex\codex.exe")
+        self.assertEqual(calls, ["codex.cmd", "codex.exe"])
+        self.assertNotIn("codex", calls)
+
+    def test_posix_platforms_resolve_codex(self) -> None:
+        for platform in ("macos", "linux", "wsl"):
+            with self.subTest(platform=platform), mock.patch(
+                "scripts.install.shutil.which", return_value="/usr/local/bin/codex"
+            ) as which:
+                resolved = resolve_codex_cli(
+                    platform=platform,
+                    environ={"PATH": "/usr/local/bin"},
+                )
+                self.assertEqual(resolved, "/usr/local/bin/codex")
+                which.assert_called_once_with("codex", path="/usr/local/bin")
+
+    def test_missing_cli_is_rejected_before_install(self) -> None:
+        with mock.patch("scripts.install.shutil.which", return_value=None):
+            with self.assertRaises(CodexCliNotFoundError):
+                resolve_codex_cli(platform="windows", environ={"PATH": "x"})
+
 
 class InstallerCliTests(unittest.TestCase):
+    def test_python_311_or_newer_is_required(self) -> None:
+        with self.assertRaisesRegex(InstallError, "Python 3.11"):
+            validate_python_version((3, 10, 14))
+        validate_python_version((3, 11, 0))
+
+    def test_python_version_error_is_structured_without_traceback(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch(
+            "scripts.install.validate_python_version",
+            side_effect=InstallError("Python 3.11 or newer is required"),
+        ), contextlib.redirect_stderr(stderr):
+            result = main(["--dry-run"])
+
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(result, 1)
+        self.assertEqual(payload["error"]["type"], "InstallError")
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_install_error_is_structured_without_traceback(self) -> None:
         stderr = io.StringIO()
         with mock.patch(

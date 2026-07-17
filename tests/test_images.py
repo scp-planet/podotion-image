@@ -115,10 +115,12 @@ class ImagesPayloadTests(unittest.TestCase):
             saved, warnings = self.module.save_image_results(results, output)
             files = [path for path in output.iterdir() if path.is_file()]
             saved_bytes = saved[0].path.read_bytes()
+            saved_path_matches = files[0].samefile(saved[0].path)
 
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved_bytes, PNG_BYTES)
-        self.assertEqual(files, [saved[0].path])
+        self.assertEqual(len(files), 1)
+        self.assertTrue(saved_path_matches)
         self.assertNotIn("_01", saved[0].path.name)
         self.assertEqual(len(warnings), 1)
         self.assertEqual(warnings[0]["code"], "invalid_image_candidate")

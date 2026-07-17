@@ -6,7 +6,9 @@ import json
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 from unittest import mock
 
 
@@ -104,17 +106,20 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(initialized["serverInfo"]["version"], manifest["version"])
 
     def test_registry_path_uses_runtime_home_not_shared_codex_home(self) -> None:
-        path = server.default_registry_path(
-            {
-                "HOME": "/home/ada",
-                "USERPROFILE": r"C:\Users\Ada",
-                "CODEX_HOME": "/mnt/c/Users/Ada/.codex",
-                "WSL_DISTRO_NAME": "Ubuntu",
-            }
-        )
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            server, "Path", PurePosixPath
+        ):
+            path = server.default_registry_path(
+                {
+                    "HOME": "/home/ada",
+                    "USERPROFILE": r"C:\Users\Ada",
+                    "CODEX_HOME": "/mnt/c/Users/Ada/.codex",
+                    "WSL_DISTRO_NAME": "Ubuntu",
+                }
+            )
         self.assertEqual(
             path,
-            Path("/home/ada/.codex/podotion-image/mcp-resources.json"),
+            PurePosixPath("/home/ada/.codex/podotion-image/mcp-resources.json"),
         )
 
     def test_tool_list_has_all_public_tools(self) -> None:
@@ -159,9 +164,9 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(
             structured["images"][0]["resource_uri"], resource_link["uri"]
         )
-        self.assertEqual(
-            structured["images"][0]["file_uri"], self.image_path.as_uri()
-        )
+        file_uri = urlsplit(structured["images"][0]["file_uri"])
+        self.assertEqual(file_uri.scheme, "file")
+        self.assertTrue(Path(url2pathname(file_uri.path)).samefile(self.image_path))
         self.assertTrue(structured["images"][0]["outputs_registered"])
 
         operation, args = self.core.calls[0]
@@ -263,7 +268,7 @@ class MCPServerTests(unittest.TestCase):
         )
         self.assertEqual(base64.b64decode(result["content"][1]["data"]), PNG_BYTES)
         image = result["structuredContent"]["images"][0]
-        self.assertEqual(image["path"], str(self.image_path))
+        self.assertTrue(Path(image["path"]).samefile(self.image_path))
         self.assertFalse(image["outputs_registered"])
         self.assertNotIn("resource_uri", image)
         self.assertEqual(

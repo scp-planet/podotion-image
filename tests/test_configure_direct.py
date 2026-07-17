@@ -44,10 +44,19 @@ class ConfigureDirectTests(unittest.TestCase):
         self.assertEqual(parsed["base_url"], "https://ai.podotion.com/v1")
         self.assertNotIn("__PODOTION_IMAGE_SK__", rendered)
 
-    def test_placeholder_and_empty_secret_are_rejected(self) -> None:
-        for value in ("", "__PODOTION_IMAGE_SK__"):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+    def test_placeholder_braces_and_empty_secret_are_rejected_without_echo(self) -> None:
+        for value in (
+            "",
+            "__PODOTION_IMAGE_SK__",
+            "{{PodotionImageSk}}",
+            "{{sk-real-looking-secret}}",
+            "{{any-value}}",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError) as caught:
                 self.module.render_config(value)
+            with self.subTest(value=value):
+                if value:
+                    self.assertNotIn(value, str(caught.exception))
 
     def test_private_write_is_atomic_and_mode_0600(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp" if os.name != "nt" else None) as temp_dir:

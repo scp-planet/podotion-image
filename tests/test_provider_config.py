@@ -38,9 +38,12 @@ class ProviderConfigTests(unittest.TestCase):
             path = self.module.direct_provider_config_path(
                 {"CODEX_HOME": str(Path(temp_dir) / "codex-home")}
             )
+            root_matches = path.parents[2].samefile(Path(temp_dir))
+            relative_path = path.relative_to(path.parents[2])
+        self.assertTrue(root_matches)
         self.assertEqual(
-            path,
-            Path(temp_dir).resolve() / "codex-home" / "podotion-image" / "provider.toml",
+            relative_path,
+            Path("codex-home") / "podotion-image" / "provider.toml",
         )
 
     def test_loads_direct_secret_and_fixed_remote_endpoint(self) -> None:
