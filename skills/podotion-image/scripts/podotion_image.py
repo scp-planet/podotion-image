@@ -12,7 +12,9 @@ import hashlib
 import ipaddress
 import json
 import math
+import ntpath
 import os
+import posixpath
 import re
 import secrets
 import socket
@@ -31,16 +33,6 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGIN_DIRECTORY = Path(__file__).resolve().parents[3]
-try:
-    sys.path.remove(str(PLUGIN_DIRECTORY))
-except ValueError:
-    pass
-sys.path.insert(0, str(PLUGIN_DIRECTORY))
-
-from podotion_image.paths import codex_home_path
-
-
 SITE_NAME = "Podotion"
 IMAGE_MODEL = "gpt-image-2"
 DIRECT_BASE_URL = "https://ai.podotion.com/v1"
@@ -48,7 +40,9 @@ DIRECT_PROVIDER_ID = "podotion-direct"
 DIRECT_CONFIG_FILENAME = "provider.toml"
 DIRECT_CONFIG_DIRECTORY = "podotion-image"
 DIRECT_SECRET_KEY = "PodotionImageSk"
+DIRECT_4K_SECRET_KEY = "PodotionImage4kSk"
 DIRECT_SECRET_PLACEHOLDER = "__PODOTION_IMAGE_SK__"
+DIRECT_4K_SECRET_PLACEHOLDER = "__PODOTION_IMAGE_4K_SK__"
 IMAGES_GENERATIONS_ENDPOINT = "images/generations"
 IMAGES_EDITS_ENDPOINT = "images/edits"
 MODELS_ENDPOINT = "models"
@@ -64,6 +58,7 @@ MAX_ERROR_RESPONSE_BYTES = 1024 * 1024
 MAX_IMAGE_DOWNLOAD_BYTES = 50 * 1024 * 1024
 MAX_INPUT_FILE_BYTES = 20 * 1024 * 1024
 MAX_PROMPT_BYTES = 1024 * 1024
+MAX_SECRET_BYTES = 64 * 1024
 MAX_INPUT_IMAGES = 5
 REQUEST_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{7,127}")
 
@@ -87,6 +82,56 @@ MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MULTIPLE = 16
 
+CANONICAL_4K_DIMENSIONS = frozenset(
+    {
+        (2880, 2880),
+        (2336, 3504),
+        (3504, 2336),
+        (2448, 3264),
+        (3264, 2448),
+        (3840, 2160),
+        (2160, 3840),
+    }
+)
+
+
+@dataclass(frozen=True)
+class ResolvedSize:
+    value: str
+    requested_size: str | None
+    requested_tier: str | None
+    requested_ratio: str | None
+    width: int | None
+    height: int | None
+
+    @property
+    def pixels(self) -> int | None:
+        if self.width is None or self.height is None:
+            return None
+        return self.width * self.height
+
+    @property
+    def credential_profile(self) -> str:
+        if self.requested_tier == "4k":
+            return "4k"
+        dimensions = (self.width, self.height)
+        if dimensions in CANONICAL_4K_DIMENSIONS:
+            return "4k"
+        if self.pixels is not None and self.pixels >= MAX_PIXELS:
+            return "4k"
+        return "default"
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "value": self.value,
+            "requested_size": self.requested_size,
+            "requested_tier": self.requested_tier,
+            "requested_ratio": self.requested_ratio,
+            "width": self.width,
+            "height": self.height,
+        }
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     provider_id: str
@@ -95,10 +140,38 @@ class ProviderConfig:
     bearer_token: str = field(repr=False)
     credential_mode: str
     config_path: Path | None = None
+    bearer_token_4k: str | None = field(default=None, repr=False)
+    credential_profile: str = "default"
 
     @property
     def secret_values(self) -> tuple[str, ...]:
-        return (self.bearer_token,) if self.bearer_token else ()
+        return tuple(
+            token for token in (self.bearer_token, self.bearer_token_4k) if token
+        )
+
+    def select_credential(self, profile: str) -> "ProviderConfig":
+        if profile == "default":
+            token = self.bearer_token
+            credential_mode = "podotion_image_sk"
+        elif profile == "4k":
+            token = self.bearer_token_4k
+            credential_mode = "podotion_image_4k_sk"
+            if not token:
+                raise RuntimeError(
+                    f"4K image requests require {DIRECT_4K_SECRET_KEY}; "
+                    "configure the 4K credential before retrying"
+                )
+        else:
+            raise ValueError(f"unsupported credential profile: {profile!r}")
+        return ProviderConfig(
+            provider_id=self.provider_id,
+            name=self.name,
+            base_url=self.base_url,
+            bearer_token=token,
+            credential_mode=credential_mode,
+            config_path=self.config_path,
+            credential_profile=profile,
+        )
 
 
 @dataclass(frozen=True)
@@ -201,7 +274,26 @@ def normalize_ratio(value: str) -> str:
     return ratio
 
 
+def normalize_size(value: str) -> str:
+    size = value.strip().lower()
+    if size in SUPPORTED_TIERS:
+        return size
+    match = re.fullmatch(r"([0-9]+)x([0-9]+)", size)
+    if match is None:
+        choices = ", ".join(SUPPORTED_TIERS)
+        raise argparse.ArgumentTypeError(
+            f"unsupported size {value!r}; choose {choices} or WIDTHxHEIGHT"
+        )
+    try:
+        validate_dimensions(int(match.group(1)), int(match.group(2)))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return size
+
+
 def validate_dimensions(width: int, height: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError("dimensions must be positive integers")
     pixels = width * height
     long_edge = max(width, height)
     short_edge = min(width, height)
@@ -215,7 +307,7 @@ def validate_dimensions(width: int, height: int) -> None:
         raise ValueError(f"pixel count {pixels} is outside {MIN_PIXELS}-{MAX_PIXELS}")
 
 
-def resolve_size(tier: str, ratio: str) -> str:
+def resolve_size(tier: str, ratio: str) -> ResolvedSize:
     if tier not in SUPPORTED_TIERS:
         choices = ", ".join(SUPPORTED_TIERS)
         raise ValueError(f"unsupported size tier {tier!r}; choose one of: {choices}")
@@ -253,15 +345,45 @@ def resolve_size(tier: str, ratio: str) -> str:
         height = height_ratio * unit * scale
 
     validate_dimensions(width, height)
-    return f"{width}x{height}"
+    return ResolvedSize(
+        value=f"{width}x{height}",
+        requested_size=tier,
+        requested_tier=tier,
+        requested_ratio=ratio,
+        width=width,
+        height=height,
+    )
 
 
-def resolve_request_size(tier: str | None, ratio: str | None) -> str:
-    if tier and not ratio:
-        raise ValueError("--ratio is required when --size is set")
-    if not tier and not ratio:
-        return AUTO_SIZE
-    return resolve_size(tier or DEFAULT_TIER, ratio or "1:1")
+def resolve_request_size(size: str | None, ratio: str | None) -> ResolvedSize:
+    normalized_size = normalize_size(size) if size else None
+    if normalized_size in SUPPORTED_TIERS:
+        if not ratio:
+            raise ValueError("--ratio is required when --size is a tier")
+        return resolve_size(normalized_size, ratio)
+    if normalized_size is not None:
+        if ratio:
+            raise ValueError("--ratio cannot be used with an exact WIDTHxHEIGHT size")
+        width, height = (int(part) for part in normalized_size.split("x", 1))
+        validate_dimensions(width, height)
+        return ResolvedSize(
+            value=normalized_size,
+            requested_size=normalized_size,
+            requested_tier=None,
+            requested_ratio=None,
+            width=width,
+            height=height,
+        )
+    if ratio:
+        return resolve_size(DEFAULT_TIER, ratio)
+    return ResolvedSize(
+        value=AUTO_SIZE,
+        requested_size=None,
+        requested_tier=None,
+        requested_ratio=None,
+        width=None,
+        height=None,
+    )
 
 
 def _is_loopback_host(hostname: str | None) -> bool:
@@ -294,6 +416,34 @@ def direct_provider_config_path(environ: Mapping[str, str] | None = None) -> Pat
     return _default_codex_home(env) / DIRECT_CONFIG_DIRECTORY / DIRECT_CONFIG_FILENAME
 
 
+def _validated_config_secret(
+    value: Any,
+    key: str,
+    *,
+    optional: bool = False,
+) -> str | None:
+    if value is None and optional:
+        return None
+    if type(value) is not str:
+        raise RuntimeError(f"Podotion image credential {key} must be a TOML string")
+    secret = value.strip()
+    if not secret:
+        if optional:
+            return None
+        raise RuntimeError(f"Podotion image credential file does not contain {key}")
+    if len(secret.encode("utf-8")) > MAX_SECRET_BYTES:
+        raise RuntimeError(f"Podotion image credential {key} exceeds the 64 KB safety limit")
+    normalized = re.sub(r"[^A-Z0-9]", "", secret.upper())
+    if (
+        secret in {DIRECT_SECRET_PLACEHOLDER, DIRECT_4K_SECRET_PLACEHOLDER}
+        or (secret.startswith("{{") and secret.endswith("}}"))
+        or "PODOTIONIMAGESK" in normalized
+        or "PODOTIONIMAGE4KSK" in normalized
+    ):
+        raise RuntimeError(f"Podotion image credential {key} placeholder has not been replaced")
+    return secret
+
+
 def load_direct_provider(
     config_path: Path | str | None = None,
     environ: Mapping[str, str] | None = None,
@@ -316,20 +466,27 @@ def load_direct_provider(
     except tomllib.TOMLDecodeError as exc:
         # Do not include parser context because a malformed line may contain the secret.
         raise RuntimeError(f"failed to parse Podotion image credential file: {path}") from exc
-    if not isinstance(config, dict):
+    if type(config) is not dict:
         raise RuntimeError("Podotion image credential file must contain a TOML table")
+    allowed_keys = {"base_url", DIRECT_SECRET_KEY, DIRECT_4K_SECRET_KEY}
+    if not set(config).issubset(allowed_keys):
+        raise RuntimeError("Podotion image credential file contains unsupported keys")
 
-    base_url = validate_base_url(str(config.get("base_url") or ""))
+    if type(config.get("base_url")) is not str:
+        raise RuntimeError("Podotion image credential base_url must be a TOML string")
+    base_url = validate_base_url(config["base_url"])
     if base_url != DIRECT_BASE_URL:
         raise RuntimeError(
             f"direct provider base_url must be exactly {DIRECT_BASE_URL}; "
             "the direct endpoint cannot be overridden"
         )
-    bearer_token = str(config.get(DIRECT_SECRET_KEY) or "").strip()
-    if not bearer_token:
-        raise RuntimeError(f"Podotion image credential file does not contain {DIRECT_SECRET_KEY}")
-    if bearer_token == DIRECT_SECRET_PLACEHOLDER or "PODOTION_IMAGE_SK" in bearer_token.upper():
-        raise RuntimeError("Podotion image credential placeholder has not been replaced")
+    bearer_token = _validated_config_secret(config.get(DIRECT_SECRET_KEY), DIRECT_SECRET_KEY)
+    bearer_token_4k = _validated_config_secret(
+        config.get(DIRECT_4K_SECRET_KEY),
+        DIRECT_4K_SECRET_KEY,
+        optional=True,
+    )
+    assert bearer_token is not None
 
     return ProviderConfig(
         provider_id=DIRECT_PROVIDER_ID,
@@ -338,6 +495,7 @@ def load_direct_provider(
         bearer_token=bearer_token,
         credential_mode="podotion_image_sk",
         config_path=path,
+        bearer_token_4k=bearer_token_4k,
     )
 
 
@@ -471,7 +629,7 @@ def redact_secrets(text: str, secrets: Iterable[str] = ()) -> str:
         redacted,
     )
     redacted = re.sub(
-        r"(?i)(PodotionImageSk\s*=\s*)[\"'][^\"']+[\"']",
+        r"(?i)(PodotionImage(?:4k)?Sk\s*=\s*)[\"'][^\"']+[\"']",
         r'\1"<redacted>"',
         redacted,
     )
@@ -1147,6 +1305,7 @@ def _request_fingerprint(
     operation: str,
     endpoint: str,
     size: str,
+    credential_profile: str,
     output_dir: Path,
     state_scope: str,
     prompt: str,
@@ -1162,6 +1321,7 @@ def _request_fingerprint(
         "model": IMAGE_MODEL,
         "endpoint": endpoint,
         "size": size,
+        "credential_profile": credential_profile,
         "output_dir": os.path.normcase(str(output_dir.resolve())),
         "state_scope": state_scope,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -1427,12 +1587,82 @@ def read_last_image(
     return path
 
 
+def _runtime_platform(
+    platform: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    os_release: str | None = None,
+) -> str:
+    value = (platform or sys.platform).lower()
+    if value in {"win32", "cygwin", "msys", "windows"}:
+        return "windows"
+    if value == "darwin" or value == "macos":
+        return "macos"
+    if value not in {"linux", "linux2", "wsl"}:
+        raise RuntimeError(f"unsupported runtime platform: {value}")
+    if value == "wsl":
+        return "wsl"
+    env = os.environ if environ is None else environ
+    release = os_release
+    if release is None:
+        try:
+            release = os.uname().release
+        except AttributeError:
+            release = ""
+    if env.get("WSL_DISTRO_NAME") or env.get("WSL_INTEROP"):
+        return "wsl"
+    if "microsoft" in release.lower() or "wsl" in release.lower():
+        return "wsl"
+    return "linux"
+
+
+def _environment_value(
+    environ: Mapping[str, str], key: str, platform: str
+) -> str | None:
+    if platform != "windows":
+        return environ.get(key)
+    wanted = key.casefold()
+    return next(
+        (value for candidate, value in environ.items() if candidate.casefold() == wanted),
+        None,
+    )
+
+
+def _native_codex_home_string(
+    environ: Mapping[str, str] | None = None,
+    *,
+    platform: str | None = None,
+    os_release: str | None = None,
+) -> str:
+    env = os.environ if environ is None else environ
+    runtime = _runtime_platform(platform, env, os_release)
+    path_module = ntpath if runtime == "windows" else posixpath
+    home_key = "USERPROFILE" if runtime == "windows" else "HOME"
+    configured = _environment_value(env, "CODEX_HOME", runtime)
+    home = _environment_value(env, home_key, runtime)
+    if configured and not configured.startswith("~"):
+        value = configured
+    else:
+        if not home:
+            if environ is not None:
+                raise RuntimeError(f"cannot locate runtime home without {home_key}")
+            home = str(Path.home())
+        value = configured or path_module.join(home, ".codex")
+    if value == "~" or value.startswith(("~/", "~\\")):
+        assert home is not None
+        value = path_module.join(home, value[2:]) if len(value) > 1 else home
+    if not path_module.isabs(value):
+        raise RuntimeError("CODEX_HOME must be an absolute native path")
+    return path_module.normpath(value)
+
+
 def _default_codex_home(environ: Mapping[str, str]) -> Path:
-    return Path(codex_home_path(environ=environ))
+    return Path(_native_codex_home_string(environ))
 
 
 def default_output_dir(cwd: Path | None = None) -> Path:
-    return (Path.cwd() if cwd is None else cwd).expanduser().resolve() / "PodotionImage"
+    return (
+        Path.cwd() if cwd is None else cwd
+    ).expanduser().resolve() / "PodotionImageOutput"
 
 
 def resolve_output_dir(value: str | None, cwd: Path | None = None) -> Path:
@@ -1467,7 +1697,7 @@ def _generation_result(
     operation: str,
     provider: ProviderConfig,
     endpoint: str,
-    size: str,
+    resolved_size: ResolvedSize,
     input_images: Sequence[Path],
     saved: Sequence[SavedImage],
     state_path: Path,
@@ -1486,11 +1716,14 @@ def _generation_result(
             "id": provider.provider_id,
             "name": provider.name,
             "credential_mode": provider.credential_mode,
+            "credential_profile": provider.credential_profile,
         },
+        "credential_profile": provider.credential_profile,
         "request": {
             "transport": "images",
             "endpoint": endpoint,
-            "size": size,
+            "size": resolved_size.value,
+            "resolved_size": resolved_size.as_json(),
             "input_image_count": len(input_images),
             "request_key": request_key,
             "fingerprint": fingerprint,
@@ -1509,7 +1742,7 @@ def _result_from_request_record(
     record: Mapping[str, Any],
     provider: ProviderConfig,
     endpoint: str,
-    size: str,
+    resolved_size: ResolvedSize,
     input_images: Sequence[Path],
     request_key: str,
     fingerprint: str,
@@ -1536,7 +1769,7 @@ def _result_from_request_record(
         str(record.get("operation") or "generate"),
         provider,
         endpoint,
-        size,
+        resolved_size,
         input_images,
         saved,
         state_path,
@@ -1550,10 +1783,10 @@ def _result_from_request_record(
 
 def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
     started = time.monotonic()
-    provider = load_direct_provider(args.credential_file)
+    resolved_size = resolve_request_size(args.size, args.ratio)
     prompt = read_prompt(args)
-    output_dir = resolve_output_dir(args.output_dir)
-    size = resolve_request_size(args.size, args.ratio)
+    provider_config = load_direct_provider(args.credential_file)
+    provider = provider_config.select_credential(resolved_size.credential_profile)
     request_key = normalize_request_key(args.request_key)
     force_new = bool(getattr(args, "force_new", False))
     state_scope_value = getattr(args, "state_scope", None)
@@ -1563,6 +1796,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
         else None
     )
     state_scope = _safe_thread_id(state_environ)
+    output_dir = resolve_output_dir(args.output_dir)
 
     input_images: list[Path] = []
     if operation == "edit":
@@ -1575,7 +1809,14 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
 
     endpoint = build_images_url(provider.base_url, operation)
     fingerprint, fingerprint_metadata = _request_fingerprint(
-        operation, endpoint, size, output_dir, state_scope, prompt, input_images
+        operation,
+        endpoint,
+        resolved_size.value,
+        provider.credential_profile,
+        output_dir,
+        state_scope,
+        prompt,
+        input_images,
     )
     record_path = _request_record_path(output_dir, request_key, state_environ)
     lock_path = _request_lock_path(output_dir, fingerprint, state_environ)
@@ -1632,7 +1873,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
                         existing,
                         provider,
                         endpoint,
-                        size,
+                        resolved_size,
                         input_images,
                         request_key,
                         fingerprint,
@@ -1703,7 +1944,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
                     alias,
                     provider,
                     endpoint,
-                    size,
+                    resolved_size,
                     input_images,
                     request_key,
                     fingerprint,
@@ -1744,7 +1985,9 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
         _atomic_write_json(record_path, record)
 
         try:
-            response = post_images(provider, operation, prompt, input_images, size)
+            response = post_images(
+                provider, operation, prompt, input_images, resolved_size.value
+            )
         except ProviderRequestError as exc:
             if exc.error_kind == "output_decode_error":
                 request_status = "completed_unusable"
@@ -1822,10 +2065,10 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
             _atomic_write_json(record_path, record)
             raise error from exc
 
-        warnings.extend(image_size_warnings(size, saved))
+        warnings.extend(image_size_warnings(resolved_size.value, saved))
         try:
             state_path = write_last_state(
-                output_dir, saved, operation, size, state_environ
+                output_dir, saved, operation, resolved_size.value, state_environ
             )
         except Exception as exc:
             for image in saved:
@@ -1896,7 +2139,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
             operation,
             provider,
             endpoint,
-            size,
+            resolved_size,
             input_images,
             saved,
             state_path,
@@ -1907,14 +2150,45 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
 
 
 def run_doctor(args: argparse.Namespace) -> dict[str, Any]:
-    provider = load_direct_provider(args.credential_file)
-    probe = probe_provider(provider)
+    provider_config = load_direct_provider(args.credential_file)
+    default_provider = provider_config.select_credential("default")
+    configured_providers = {"default": default_provider}
+    if provider_config.bearer_token_4k:
+        configured_providers["4k"] = provider_config.select_credential("4k")
+
+    profile_reports: dict[str, dict[str, Any]] = {}
+    for profile, provider in configured_providers.items():
+        connectivity = probe_provider(provider)
+        profile_reports[profile] = {
+            "configured": True,
+            "credential_mode": provider.credential_mode,
+            "reachable": bool(connectivity["reachable"]),
+            "http_status": connectivity.get("http_status"),
+            "connectivity": connectivity,
+        }
+    warnings: list[dict[str, Any]] = []
+    if "4k" not in configured_providers:
+        profile_reports["4k"] = {
+            "configured": False,
+            "credential_mode": "podotion_image_4k_sk",
+            "reachable": None,
+            "http_status": None,
+            "connectivity": None,
+        }
+        warnings.append(
+            {
+                "code": "optional_4k_credential_missing",
+                "message": f"{DIRECT_4K_SECRET_KEY} is not configured; 4K requests are unavailable",
+            }
+        )
+
     capability: dict[str, Any] = {
         "attempted": False,
         "may_bill": False,
         "note": "use --image-probe to test billable image generation",
     }
-    if args.image_probe:
+    image_probe = bool(getattr(args, "image_probe", False))
+    if image_probe:
         capability = {
             "attempted": True,
             "may_bill": True,
@@ -1922,25 +2196,29 @@ def run_doctor(args: argparse.Namespace) -> dict[str, Any]:
             "available": False,
         }
         prompt = "Generate a plain light gray square with no text."
-        size = resolve_size("1k", "1:1")
+        resolved_size = resolve_size("1k", "1:1")
         try:
             response = post_images(
-                provider,
+                default_provider,
                 "generate",
                 prompt,
-                size=size,
+                size=resolved_size.value,
             )
-            endpoint = build_images_url(provider.base_url, "generate")
+            endpoint = build_images_url(default_provider.base_url, "generate")
             results = extract_image_results(response)
             output_dir = default_output_dir() / "doctor-probe"
-            saved, warnings = save_image_results(results, output_dir, TIMEOUT_SECONDS)
-            warnings.extend(image_size_warnings(size, saved))
+            saved, capability_warnings = save_image_results(
+                results, output_dir, TIMEOUT_SECONDS
+            )
+            capability_warnings.extend(
+                image_size_warnings(resolved_size.value, saved)
+            )
             capability.update({
                 "available": True,
                 "endpoint": endpoint,
                 "image_result_count": len(saved),
                 "images": [image.as_json() for image in saved],
-                "warnings": warnings,
+                "warnings": capability_warnings,
             })
         except ProviderRequestError as exc:
             capability["error"] = exc.as_json()
@@ -1955,28 +2233,37 @@ def run_doctor(args: argparse.Namespace) -> dict[str, Any]:
             capability["error"] = {
                 "type": type(exc).__name__,
                 "error_kind": "output_decode_error",
-                "message": redact_secrets(str(exc), provider.secret_values),
+                "message": redact_secrets(str(exc), default_provider.secret_values),
             }
-    ok = bool(probe["reachable"]) and (
-        not args.image_probe or bool(capability.get("available"))
+    profiles_reachable = all(
+        bool(report["reachable"])
+        for report in profile_reports.values()
+        if report["configured"]
+    )
+    ok = profiles_reachable and (
+        not image_probe or bool(capability.get("available"))
     )
     return {
         "ok": ok,
         "site": SITE_NAME,
-        "provider_id": provider.provider_id,
-        "provider_name": provider.name,
-        "base_url": provider.base_url,
-        "credential_mode": provider.credential_mode,
-        "config_path": str(provider.config_path) if provider.config_path else None,
+        "provider_id": default_provider.provider_id,
+        "provider_name": default_provider.name,
+        "base_url": default_provider.base_url,
+        "credential_mode": default_provider.credential_mode,
+        "config_path": (
+            str(default_provider.config_path) if default_provider.config_path else None
+        ),
         "transport": "images",
         "endpoints": {
-            "generate": build_images_url(provider.base_url, "generate"),
-            "edit": build_images_url(provider.base_url, "edit"),
+            "generate": build_images_url(default_provider.base_url, "generate"),
+            "edit": build_images_url(default_provider.base_url, "edit"),
         },
         "model": IMAGE_MODEL,
         "output_directory": str(default_output_dir()),
-        "connectivity": probe,
+        "connectivity": profile_reports["default"]["connectivity"],
+        "credential_profiles": profile_reports,
         "image_capability": capability,
+        "warnings": warnings,
     }
 
 
@@ -1984,15 +2271,26 @@ def run_sizes(_args: argparse.Namespace) -> dict[str, Any]:
     return {
         "ok": True,
         "sizes": {
-            tier: {ratio: resolve_size(tier, ratio) for ratio in SUPPORTED_RATIOS}
+            tier: {
+                ratio: resolve_size(tier, ratio).value for ratio in SUPPORTED_RATIOS
+            }
             for tier in SUPPORTED_TIERS
         },
     }
 
 
+def _state_environ_from_args(args: argparse.Namespace) -> Mapping[str, str] | None:
+    state_scope = getattr(args, "state_scope", None)
+    if state_scope is None:
+        return None
+    return {"CODEX_THREAD_ID": str(state_scope)}
+
+
 def run_request_status(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = resolve_output_dir(args.output_dir)
-    return get_request_status(output_dir, args.request_key)
+    return get_request_status(
+        output_dir, args.request_key, _state_environ_from_args(args)
+    )
 
 
 def run_request_abandon(args: argparse.Namespace) -> dict[str, Any]:
@@ -2001,6 +2299,7 @@ def run_request_abandon(args: argparse.Namespace) -> dict[str, Any]:
         output_dir,
         args.request_key,
         args.acknowledge_possible_charge,
+        _state_environ_from_args(args),
     )
 
 
@@ -2011,11 +2310,15 @@ def _add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_render_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--size", choices=SUPPORTED_TIERS.keys(), help="size tier")
+    parser.add_argument(
+        "--size",
+        type=normalize_size,
+        help="size tier (1k, 2k, 4k) or exact WIDTHxHEIGHT",
+    )
     parser.add_argument("--ratio", type=normalize_ratio, help="aspect ratio")
     parser.add_argument(
         "--output-dir",
-        help="output directory; defaults to ./PodotionImage in the current working directory",
+        help="output directory; defaults to ./PodotionImageOutput in the current working directory",
     )
 
 
@@ -2030,6 +2333,10 @@ def _add_request_safety_arguments(parser: argparse.ArgumentParser) -> None:
         "--force-new",
         action="store_true",
         help="create a new variant instead of reusing a recent equivalent success",
+    )
+    parser.add_argument(
+        "--state-scope",
+        help="stable task or thread scope for request recovery and --last",
     )
 
 
@@ -2074,6 +2381,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument("--request-key", type=normalize_request_key, required=True)
     status_parser.add_argument("--output-dir")
+    status_parser.add_argument("--state-scope")
     status_parser.set_defaults(func=run_request_status)
 
     abandon_parser = subparsers.add_parser(
@@ -2082,6 +2390,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     abandon_parser.add_argument("--request-key", type=normalize_request_key, required=True)
     abandon_parser.add_argument("--output-dir")
+    abandon_parser.add_argument("--state-scope")
     abandon_parser.add_argument(
         "--acknowledge-possible-charge",
         action="store_true",

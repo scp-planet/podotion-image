@@ -24,13 +24,20 @@ class ProviderConfigTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def write_direct_config(self, path: Path, secret: str = "sk-image-secret") -> Path:
+    def write_direct_config(
+        self,
+        path: Path,
+        secret: str = "sk-image-secret",
+        secret_4k: str | None = None,
+    ) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        content = (
             'base_url = "https://ai.podotion.com/v1"\n'
-            f'PodotionImageSk = "{secret}"\n',
-            encoding="utf-8",
+            f'PodotionImageSk = "{secret}"\n'
         )
+        if secret_4k is not None:
+            content += f'PodotionImage4kSk = "{secret_4k}"\n'
+        path.write_text(content, encoding="utf-8")
         return path
 
     def test_default_path_uses_codex_home_runtime_directory(self) -> None:
@@ -59,6 +66,92 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(
             self.module._request_headers(provider)["Authorization"],
             "Bearer sk-image-secret",
+        )
+
+    def test_loads_and_selects_two_credentials_without_repr_leaks(self) -> None:
+        default_secret = "sk-default-private"
+        secret_4k = "sk-4k-private"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self.write_direct_config(
+                Path(temp_dir) / "provider.toml", default_secret, secret_4k
+            )
+            provider = self.module.load_direct_provider(config, environ={})
+
+        selected_default = provider.select_credential("default")
+        selected_4k = provider.select_credential("4k")
+        self.assertEqual(selected_default.bearer_token, default_secret)
+        self.assertEqual(selected_default.credential_profile, "default")
+        self.assertEqual(selected_4k.bearer_token, secret_4k)
+        self.assertEqual(selected_4k.credential_profile, "4k")
+        self.assertEqual(selected_4k.credential_mode, "podotion_image_4k_sk")
+        for value in (provider, selected_default, selected_4k):
+            self.assertNotIn(default_secret, repr(value))
+            self.assertNotIn(secret_4k, repr(value))
+
+    def test_missing_optional_4k_credential_fails_only_when_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self.write_direct_config(Path(temp_dir) / "provider.toml")
+            provider = self.module.load_direct_provider(config, environ={})
+
+        self.assertEqual(provider.select_credential("default").credential_profile, "default")
+        with self.assertRaisesRegex(RuntimeError, "PodotionImage4kSk"):
+            provider.select_credential("4k")
+
+    def test_config_fields_require_canonical_toml_string_types(self) -> None:
+        invalid = (
+            'base_url = 123\nPodotionImageSk = "sk-default"\n',
+            'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = 123\n',
+            'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = "sk-default"\nPodotionImage4kSk = 123\n',
+            'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = "sk-default"\nextra = true\n',
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "provider.toml"
+            for content in invalid:
+                with self.subTest(content=content.splitlines()[-1]):
+                    config.write_text(content, encoding="utf-8")
+                    with self.assertRaises(RuntimeError):
+                        self.module.load_direct_provider(config, environ={})
+
+    def test_braced_and_4k_placeholders_are_rejected(self) -> None:
+        placeholders = (
+            ("{{PodotionImageSk}}", None),
+            ("sk-default", "{{PodotionImage4kSk}}"),
+            ("sk-default", self.module.DIRECT_4K_SECRET_PLACEHOLDER),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "provider.toml"
+            for default_secret, secret_4k in placeholders:
+                with self.subTest(default=default_secret, four_k=secret_4k):
+                    self.write_direct_config(config, default_secret, secret_4k)
+                    with self.assertRaisesRegex(RuntimeError, "placeholder"):
+                        self.module.load_direct_provider(config, environ={})
+
+    def test_native_codex_home_defaults_cover_supported_platforms(self) -> None:
+        cases = [
+            ("windows", {"USERPROFILE": r"C:\\Users\\Ada"}, r"C:\Users\Ada\.codex"),
+            ("macos", {"HOME": "/Users/ada"}, "/Users/ada/.codex"),
+            ("linux", {"HOME": "/home/ada"}, "/home/ada/.codex"),
+            (
+                "linux",
+                {"HOME": "/home/ada", "WSL_DISTRO_NAME": "Ubuntu"},
+                "/home/ada/.codex",
+            ),
+        ]
+        for platform, environ, expected in cases:
+            with self.subTest(platform=platform, environ=environ):
+                self.assertEqual(
+                    self.module._native_codex_home_string(
+                        environ, platform=platform, os_release=""
+                    ),
+                    expected,
+                )
+
+    def test_windows_codex_home_lookup_is_case_insensitive(self) -> None:
+        self.assertEqual(
+            self.module._native_codex_home_string(
+                {"codex_home": r"D:\\Codex Data"}, platform="windows"
+            ),
+            r"D:\Codex Data",
         )
 
     def test_missing_direct_config_has_actionable_error(self) -> None:
@@ -119,6 +212,13 @@ class ProviderConfigTests(unittest.TestCase):
         redacted = self.module.redact_secrets(message, secrets=[secret])
         self.assertNotIn(secret, redacted)
         self.assertNotIn("Bearer sk-", redacted)
+
+    def test_redaction_removes_4k_config_secret_without_explicit_secret_list(self) -> None:
+        secret = "sk-4k-super-secret-value"
+        redacted = self.module.redact_secrets(
+            f'PodotionImage4kSk = "{secret}"'
+        )
+        self.assertNotIn(secret, redacted)
 
 
 if __name__ == "__main__":

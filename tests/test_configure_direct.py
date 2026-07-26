@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -10,6 +11,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.support import SKILL_ROOT
 
@@ -36,38 +38,97 @@ class ConfigureDirectTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def test_render_replaces_placeholder_and_escapes_toml(self) -> None:
+    def run_cli(self, target: Path, stdin: str, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(CONFIGURE_PATH),
+                "--stdin",
+                "--credential-file",
+                str(target),
+                *extra,
+            ],
+            input=stdin,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_render_default_only_is_backward_compatible(self) -> None:
         secret = 'sk-value-with-"quote"-and-\\slash'
         rendered = self.module.render_config(secret)
         parsed = tomllib.loads(rendered)
         self.assertEqual(parsed["PodotionImageSk"], secret)
         self.assertEqual(parsed["base_url"], "https://ai.podotion.com/v1")
-        self.assertNotIn("__PODOTION_IMAGE_SK__", rendered)
+        self.assertNotIn("PodotionImage4kSk", parsed)
+        self.assertNotIn("__PODOTION_IMAGE", rendered)
 
-    def test_placeholder_braces_and_empty_secret_are_rejected_without_echo(self) -> None:
-        for value in (
+    def test_render_writes_both_credentials(self) -> None:
+        parsed = tomllib.loads(self.module.render_config("sk-default", "sk-4k"))
+        self.assertEqual(parsed["PodotionImageSk"], "sk-default")
+        self.assertEqual(parsed["PodotionImage4kSk"], "sk-4k")
+
+    def test_render_rejects_non_string_4k_credential(self) -> None:
+        with self.assertRaisesRegex(ValueError, "TOML string"):
+            self.module.render_config("sk-default", 123)
+
+    def test_invalid_secrets_are_rejected_without_echo(self) -> None:
+        values = (
             "",
             "__PODOTION_IMAGE_SK__",
+            "__PODOTION_IMAGE_4K_SK__",
             "{{PodotionImageSk}}",
             "{{sk-real-looking-secret}}",
-            "{{any-value}}",
-        ):
-            with self.subTest(value=value), self.assertRaises(ValueError) as caught:
-                self.module.render_config(value)
-            with self.subTest(value=value):
-                if value:
-                    self.assertNotIn(value, str(caught.exception))
+            "line-one\nline-two",
+            123,
+            ["sk-list"],
+        )
+        for value in values:
+            with self.subTest(value=type(value).__name__), self.assertRaises(ValueError) as caught:
+                self.module.validate_secret(value)
+            if isinstance(value, str) and value:
+                self.assertNotIn(value, str(caught.exception))
+
+    def test_secret_size_limit_uses_utf8_bytes(self) -> None:
+        accepted = "x" * self.module.MAX_SECRET_BYTES
+        rejected = "\u754c" * ((self.module.MAX_SECRET_BYTES // 3) + 1)
+        self.assertEqual(self.module.validate_secret(accepted), accepted)
+        with self.assertRaisesRegex(ValueError, "64 KB") as caught:
+            self.module.validate_secret(rejected)
+        self.assertNotIn(rejected, str(caught.exception))
+
+    def test_template_requires_exact_string_placeholders_and_endpoint(self) -> None:
+        templates = (
+            'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = 1\nPodotionImage4kSk = "__PODOTION_IMAGE_4K_SK__"\n',
+            'base_url = "https://example.test/v1"\nPodotionImageSk = "__PODOTION_IMAGE_SK__"\nPodotionImage4kSk = "__PODOTION_IMAGE_4K_SK__"\n',
+            'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = "__PODOTION_IMAGE_SK__"\nPodotionImage4kSk = "wrong"\n',
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "provider.toml"
+            for template in templates:
+                path.write_text(template, encoding="utf-8")
+                with self.subTest(template=template), self.assertRaises(RuntimeError):
+                    self.module.render_config("sk-default", "sk-4k", path)
+
+    def test_stdin_reader_supports_text_stream_embedders(self) -> None:
+        original = self.module.sys.stdin
+        try:
+            self.module.sys.stdin = io.StringIO("sk-default\nsk-4k\n")
+            self.assertEqual(
+                self.module._read_credentials_from_stdin(),
+                ("sk-default", "sk-4k"),
+            )
+        finally:
+            self.module.sys.stdin = original
 
     def test_private_write_is_atomic_and_mode_0600(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp" if os.name != "nt" else None) as temp_dir:
             target = Path(temp_dir) / "runtime" / "provider.toml"
             result = self.module.write_private_config(
-                target,
-                self.module.render_config("sk-private"),
+                target, self.module.render_config("sk-private", "sk-private-4k")
             )
             leftovers = list(target.parent.glob(".provider.toml.*.tmp"))
             mode = stat.S_IMODE(target.stat().st_mode)
-
         self.assertEqual(result, target.resolve())
         self.assertEqual(leftovers, [])
         if os.name != "nt":
@@ -82,30 +143,113 @@ class ConfigureDirectTests(unittest.TestCase):
             self.module.write_private_config(target, "new", force=True)
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
 
-    def test_stdin_cli_never_prints_secret(self) -> None:
+    def test_failed_replace_preserves_existing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            target.write_text("old", encoding="utf-8")
+            with mock.patch.object(self.module.os, "replace", side_effect=OSError("failed")):
+                with self.assertRaises(OSError):
+                    self.module.write_private_config(target, "new", force=True)
+            self.assertEqual(target.read_text(encoding="utf-8"), "old")
+            self.assertEqual(list(target.parent.glob(".provider.toml.*.tmp")), [])
+
+    def test_stdin_cli_accepts_legacy_single_line_without_leak(self) -> None:
         secret = "sk-cli-never-print-this"
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "provider.toml"
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(CONFIGURE_PATH),
-                    "--stdin",
-                    "--credential-file",
-                    str(target),
-                ],
-                input=secret,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            result = self.run_cli(target, secret + "\n", "--force")
             report = json.loads(result.stdout)
             saved = tomllib.loads(target.read_text(encoding="utf-8"))
-
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(report["ok"])
+        self.assertEqual(report["credential_profiles"], {"default": True, "4k": False})
         self.assertEqual(saved["PodotionImageSk"], secret)
+        self.assertNotIn("PodotionImage4kSk", saved)
         self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_stdin_cli_accepts_two_lines_without_leaks(self) -> None:
+        default_secret = "sk-default-never-print"
+        four_k_secret = "sk-4k-never-print"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            result = self.run_cli(
+                target, f"{default_secret}\n{four_k_secret}\n", "--force"
+            )
+            saved = tomllib.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(saved["PodotionImageSk"], default_secret)
+        self.assertEqual(saved["PodotionImage4kSk"], four_k_secret)
+        self.assertNotIn(default_secret, result.stdout + result.stderr)
+        self.assertNotIn(four_k_secret, result.stdout + result.stderr)
+
+    def test_set_4k_preserves_default_and_replaces_4k(self) -> None:
+        default_secret = "sk-default-preserved"
+        new_four_k = "sk-new-4k"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            target.write_text(
+                self.module.render_config(default_secret, "sk-old-4k"), encoding="utf-8"
+            )
+            result = self.run_cli(target, new_four_k + "\n", "--set-4k", "--force")
+            saved = tomllib.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(saved["PodotionImageSk"], default_secret)
+        self.assertEqual(saved["PodotionImage4kSk"], new_four_k)
+        self.assertNotIn(default_secret, result.stdout + result.stderr)
+        self.assertNotIn(new_four_k, result.stdout + result.stderr)
+
+    def test_set_4k_requires_flags_and_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "missing.toml"
+            missing = self.run_cli(target, "sk-new-4k\n", "--set-4k", "--force")
+            no_force = self.run_cli(target, "sk-new-4k\n", "--set-4k")
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertNotEqual(no_force.returncode, 0)
+            self.assertFalse(target.exists())
+
+    def test_set_4k_invalid_existing_config_is_zero_write_and_no_leak(self) -> None:
+        new_four_k = "sk-new-must-not-leak"
+        configs = (
+            b'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = 123\n',
+            b'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = "{{placeholder}}"\n',
+            b'base_url = "https://ai.podotion.com/v1"\nPodotionImageSk = "sk-old"\nextra = true\n',
+            b'base_url = "https://example.test/v1"\nPodotionImageSk = "sk-old"\n',
+            b'not valid toml = "sk-old"\n',
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            for original in configs:
+                target.write_bytes(original)
+                with self.subTest(original=original):
+                    result = self.run_cli(
+                        target, new_four_k + "\n", "--set-4k", "--force"
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(target.read_bytes(), original)
+                    self.assertEqual(list(target.parent.glob(".provider.toml.*.tmp")), [])
+                    self.assertNotIn(new_four_k, result.stdout + result.stderr)
+
+    def test_set_4k_rejects_oversized_existing_config_without_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            original = b"#" * (self.module.MAX_CONFIG_BYTES + 1)
+            target.write_bytes(original)
+            result = self.run_cli(target, "sk-new-4k\n", "--set-4k", "--force")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_stdin_rejects_extra_lines_and_oversize_without_write(self) -> None:
+        inputs = (
+            "sk-one\nsk-two\nsk-three",
+            "z" * (self.module.MAX_SECRET_BYTES + 1),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            for stdin in inputs:
+                with self.subTest(length=len(stdin)):
+                    result = self.run_cli(target, stdin, "--force")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(target.exists())
+                    self.assertNotIn(stdin, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

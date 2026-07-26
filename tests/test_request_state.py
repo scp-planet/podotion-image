@@ -27,13 +27,16 @@ class RequestStateTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def provider(self, token: str = "sk-test-direct"):
+    def provider(
+        self, token: str = "sk-test-direct", token_4k: str | None = None
+    ):
         return self.module.ProviderConfig(
             provider_id="podotion-direct",
             name="Podotion",
             base_url="https://ai.podotion.com/v1",
             bearer_token=token,
             credential_mode="podotion_image_sk",
+            bearer_token_4k=token_4k,
         )
 
     def args(self, output_dir: str, request_key: str, **overrides):
@@ -322,6 +325,35 @@ class RequestStateTests(unittest.TestCase):
         self.assertNotIn(prompt, state_text)
         self.assertNotIn(token, state_text)
         self.assertNotIn(PNG_B64, state_text)
+
+    def test_4k_request_state_identifies_profile_without_storing_either_token(self) -> None:
+        default_token = "sk-default-private-token"
+        token_4k = "sk-4k-private-token"
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            self.module,
+            "load_direct_provider",
+            return_value=self.provider(default_token, token_4k),
+        ), mock.patch.object(
+            self.module, "post_images", return_value=self.response()
+        ):
+            result = self.module.run_generation(
+                self.args(
+                    temp_dir,
+                    "redaction-4k-0001",
+                    size="4k",
+                    ratio="16:9",
+                ),
+                "generate",
+            )
+            state_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in Path(temp_dir).glob(".state/**/*.json")
+            )
+
+        self.assertEqual(result["credential_profile"], "4k")
+        self.assertIn('"credential_profile": "4k"', state_text)
+        self.assertNotIn(default_token, state_text)
+        self.assertNotIn(token_4k, state_text)
 
 
 if __name__ == "__main__":

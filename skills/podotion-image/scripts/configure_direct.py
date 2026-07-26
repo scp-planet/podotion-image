@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the Podotion image credential without exposing it in argv or output."""
+"""Configure Podotion image credentials without exposing them in argv or output."""
 
 from __future__ import annotations
 
@@ -10,11 +10,15 @@ import json
 import os
 import secrets
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
+from typing import Any, Iterable
 
 
 MAX_SECRET_BYTES = 64 * 1024
+MAX_STDIN_BYTES = (2 * MAX_SECRET_BYTES) + 4
+MAX_CONFIG_BYTES = (2 * MAX_SECRET_BYTES) + (4 * 1024)
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "provider.toml"
 
 
@@ -31,29 +35,140 @@ def _load_runtime() -> ModuleType:
 
 runtime = _load_runtime()
 
+DEFAULT_SECRET_KEY = getattr(runtime, "DIRECT_SECRET_KEY", "PodotionImageSk")
+FOUR_K_SECRET_KEY = getattr(runtime, "DIRECT_4K_SECRET_KEY", "PodotionImage4kSk")
+DEFAULT_SECRET_PLACEHOLDER = getattr(
+    runtime, "DIRECT_SECRET_PLACEHOLDER", "__PODOTION_IMAGE_SK__"
+)
+FOUR_K_SECRET_PLACEHOLDER = getattr(
+    runtime, "DIRECT_4K_SECRET_PLACEHOLDER", "__PODOTION_IMAGE_4K_SK__"
+)
+CANONICAL_KEYS = frozenset({"base_url", DEFAULT_SECRET_KEY, FOUR_K_SECRET_KEY})
 
-def validate_secret(value: str) -> str:
+
+def validate_secret(value: Any, *, key: str = DEFAULT_SECRET_KEY) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{key} must be a TOML string")
     secret = value.strip()
     if not secret:
-        raise ValueError("PodotionImageSk cannot be empty")
-    if secret.startswith("{{") and secret.endswith("}}"):
-        raise ValueError("PodotionImageSk must replace the entire placeholder without braces")
-    if secret == runtime.DIRECT_SECRET_PLACEHOLDER or "PODOTION_IMAGE_SK" in secret.upper():
-        raise ValueError("PodotionImageSk placeholder has not been replaced")
+        raise ValueError(f"{key} cannot be empty")
     if "\r" in secret or "\n" in secret:
-        raise ValueError("PodotionImageSk must be a single line")
+        raise ValueError(f"{key} must be a single line")
     if len(secret.encode("utf-8")) > MAX_SECRET_BYTES:
-        raise ValueError("PodotionImageSk exceeds the 64 KB safety limit")
+        raise ValueError(f"{key} exceeds the 64 KB safety limit")
+
+    upper_secret = secret.upper()
+    placeholders = {
+        DEFAULT_SECRET_PLACEHOLDER.upper(),
+        FOUR_K_SECRET_PLACEHOLDER.upper(),
+    }
+    if (
+        (secret.startswith("{{") and secret.endswith("}}"))
+        or (secret.startswith("__") and secret.endswith("__"))
+        or upper_secret in placeholders
+        or "PODOTIONIMAGESK" in upper_secret
+        or "PODOTIONIMAGE4KSK" in upper_secret
+    ):
+        raise ValueError(f"{key} placeholder has not been replaced")
     return secret
 
 
-def render_config(secret: str, template_path: Path = TEMPLATE_PATH) -> str:
-    template = template_path.read_text(encoding="utf-8")
-    placeholder = json.dumps(runtime.DIRECT_SECRET_PLACEHOLDER)
-    if template.count(placeholder) != 1:
-        raise RuntimeError("provider template must contain exactly one quoted secret placeholder")
-    rendered = template.replace(placeholder, json.dumps(validate_secret(secret), ensure_ascii=False))
+def _read_template(template_path: Path) -> str:
+    try:
+        raw = template_path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError("provider template could not be read") from exc
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise RuntimeError("provider template exceeds the safety limit")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("provider template must be UTF-8") from exc
+
+
+def _validate_template(template: str) -> None:
+    try:
+        parsed = tomllib.loads(template)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError("provider template is not valid TOML") from exc
+    if set(parsed) != CANONICAL_KEYS:
+        raise RuntimeError("provider template must contain only the canonical keys")
+    if type(parsed.get("base_url")) is not str or parsed["base_url"] != runtime.DIRECT_BASE_URL:
+        raise RuntimeError("provider template contains an invalid base_url")
+    if parsed.get(DEFAULT_SECRET_KEY) != DEFAULT_SECRET_PLACEHOLDER:
+        raise RuntimeError("provider template contains an invalid default credential placeholder")
+    if parsed.get(FOUR_K_SECRET_KEY) != FOUR_K_SECRET_PLACEHOLDER:
+        raise RuntimeError("provider template contains an invalid 4K credential placeholder")
+
+
+def render_config(
+    default_secret: str,
+    four_k_secret: str | None = None,
+    template_path: Path = TEMPLATE_PATH,
+) -> str:
+    default_value = validate_secret(default_secret, key=DEFAULT_SECRET_KEY)
+    if four_k_secret is None:
+        four_k_value = None
+    elif type(four_k_secret) is not str:
+        four_k_value = validate_secret(four_k_secret, key=FOUR_K_SECRET_KEY)
+    elif four_k_secret.strip():
+        four_k_value = validate_secret(four_k_secret, key=FOUR_K_SECRET_KEY)
+    else:
+        four_k_value = None
+
+    template = _read_template(template_path)
+    _validate_template(template)
+    default_placeholder = json.dumps(DEFAULT_SECRET_PLACEHOLDER)
+    four_k_placeholder = json.dumps(FOUR_K_SECRET_PLACEHOLDER)
+    if template.count(default_placeholder) != 1 or template.count(four_k_placeholder) != 1:
+        raise RuntimeError("provider template placeholders must each occur exactly once")
+
+    rendered = template.replace(
+        default_placeholder, json.dumps(default_value, ensure_ascii=False)
+    )
+    if four_k_value is None:
+        rendered = "\n".join(
+            line for line in rendered.splitlines() if four_k_placeholder not in line
+        )
+    else:
+        rendered = rendered.replace(
+            four_k_placeholder, json.dumps(four_k_value, ensure_ascii=False)
+        )
     return rendered if rendered.endswith("\n") else rendered + "\n"
+
+
+def read_existing_config(path: Path) -> tuple[str, str | None]:
+    target = path.expanduser().resolve()
+    if not target.is_file():
+        raise FileNotFoundError("existing canonical credential file was not found")
+    try:
+        with target.open("rb") as handle:
+            raw = handle.read(MAX_CONFIG_BYTES + 1)
+    except OSError as exc:
+        raise RuntimeError("existing credential file could not be read") from exc
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise RuntimeError("existing credential file exceeds the safety limit")
+    try:
+        config = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError("existing credential file is not valid UTF-8 TOML") from exc
+
+    allowed_shapes = (
+        {"base_url", DEFAULT_SECRET_KEY},
+        {"base_url", DEFAULT_SECRET_KEY, FOUR_K_SECRET_KEY},
+    )
+    if type(config) is not dict or set(config) not in allowed_shapes:
+        raise RuntimeError("existing credential file does not have the canonical shape")
+    if type(config["base_url"]) is not str or config["base_url"] != runtime.DIRECT_BASE_URL:
+        raise RuntimeError("existing credential file contains an invalid base_url")
+
+    default_secret = validate_secret(config[DEFAULT_SECRET_KEY], key=DEFAULT_SECRET_KEY)
+    four_k_secret = (
+        validate_secret(config[FOUR_K_SECRET_KEY], key=FOUR_K_SECRET_KEY)
+        if FOUR_K_SECRET_KEY in config
+        else None
+    )
+    return default_secret, four_k_secret
 
 
 def write_private_config(destination: Path, content: str, *, force: bool = False) -> Path:
@@ -67,8 +182,7 @@ def write_private_config(destination: Path, content: str, *, force: bool = False
         pass
 
     temporary = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(temporary, flags, 0o600)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
@@ -91,16 +205,63 @@ def write_private_config(destination: Path, content: str, *, force: bool = False
     return target
 
 
+def _read_stdin_lines(max_bytes: int) -> list[str]:
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    data = stream.read(max_bytes + 1)
+    if isinstance(data, str):
+        try:
+            encoded = data.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("credential input must be UTF-8") from exc
+    else:
+        encoded = data
+    if len(encoded) > max_bytes:
+        raise ValueError("credential input exceeds the safety limit")
+    try:
+        text = encoded.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("credential input must be UTF-8") from exc
+    return text.splitlines()
+
+
+def _read_credentials_from_stdin() -> tuple[str, str | None]:
+    lines = _read_stdin_lines(MAX_STDIN_BYTES)
+    if not lines or len(lines) > 2:
+        raise ValueError("stdin must contain a default credential and an optional 4K credential")
+    default_secret = validate_secret(lines[0], key=DEFAULT_SECRET_KEY)
+    four_k_secret = (
+        validate_secret(lines[1], key=FOUR_K_SECRET_KEY)
+        if len(lines) == 2 and lines[1].strip()
+        else None
+    )
+    return default_secret, four_k_secret
+
+
+def _read_four_k_from_stdin() -> str:
+    lines = _read_stdin_lines(MAX_SECRET_BYTES + 2)
+    if len(lines) != 1:
+        raise ValueError("stdin must contain exactly one 4K credential")
+    return validate_secret(lines[0], key=FOUR_K_SECRET_KEY)
+
+
+def _safe_error_message(exc: Exception, secret_values: Iterable[str]) -> str:
+    try:
+        return runtime.redact_secrets(str(exc), tuple(secret_values))
+    except Exception:
+        return "credential configuration failed"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Write PodotionImageSk to the private Podotion image runtime config."
+        description="Write Podotion image credentials to the private runtime config."
     )
-    parser.add_argument(
-        "--stdin",
-        action="store_true",
-        help="read the secret from stdin instead of a hidden interactive prompt",
-    )
+    parser.add_argument("--stdin", action="store_true", help="read credentials from stdin")
     parser.add_argument("--force", action="store_true", help="replace an existing credential file")
+    parser.add_argument(
+        "--set-4k",
+        action="store_true",
+        help="preserve the existing default credential and set only the 4K credential",
+    )
     parser.add_argument(
         "--credential-file",
         help="target path; defaults to $CODEX_HOME/podotion-image/provider.toml",
@@ -110,17 +271,39 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    secret_values: list[str] = []
     try:
-        if args.stdin:
-            secret = sys.stdin.read(MAX_SECRET_BYTES + 1)
-        else:
-            secret = getpass.getpass("PodotionImageSk: ")
-        content = render_config(secret)
         destination = (
             Path(args.credential_file)
             if args.credential_file
             else runtime.direct_provider_config_path()
         )
+        if args.set_4k:
+            if not args.stdin or not args.force:
+                raise ValueError("--set-4k requires --stdin and --force")
+            four_k_secret = _read_four_k_from_stdin()
+            secret_values.append(four_k_secret)
+            default_secret, _ = read_existing_config(destination)
+            secret_values.append(default_secret)
+            content = render_config(default_secret, four_k_secret)
+        else:
+            if args.stdin:
+                default_secret, four_k_secret = _read_credentials_from_stdin()
+            else:
+                default_secret = validate_secret(
+                    getpass.getpass(f"{DEFAULT_SECRET_KEY}: "), key=DEFAULT_SECRET_KEY
+                )
+                entered_four_k = getpass.getpass(f"{FOUR_K_SECRET_KEY} (optional): ")
+                four_k_secret = (
+                    validate_secret(entered_four_k, key=FOUR_K_SECRET_KEY)
+                    if entered_four_k.strip()
+                    else None
+                )
+            secret_values.append(default_secret)
+            if four_k_secret:
+                secret_values.append(four_k_secret)
+            content = render_config(default_secret, four_k_secret)
+
         target = write_private_config(destination, content, force=args.force)
         print(
             json.dumps(
@@ -128,7 +311,10 @@ def main() -> int:
                     "ok": True,
                     "config_path": str(target),
                     "base_url": runtime.DIRECT_BASE_URL,
-                    "credential_mode": "podotion_image_sk",
+                    "credential_profiles": {
+                        "default": True,
+                        "4k": four_k_secret is not None,
+                    },
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -142,7 +328,7 @@ def main() -> int:
                     "ok": False,
                     "error": {
                         "type": type(exc).__name__,
-                        "message": runtime.redact_secrets(str(exc)),
+                        "message": _safe_error_message(exc, secret_values),
                     },
                 },
                 ensure_ascii=False,

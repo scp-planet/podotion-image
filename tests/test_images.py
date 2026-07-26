@@ -121,7 +121,7 @@ class ImagesPayloadTests(unittest.TestCase):
         self.assertEqual(saved_bytes, PNG_BYTES)
         self.assertEqual(len(files), 1)
         self.assertTrue(saved_path_matches)
-        self.assertNotIn("_01", saved[0].path.name)
+        self.assertRegex(saved[0].path.name, r"^\d{8}_\d{6}_\d{6}\.png$")
         self.assertEqual(len(warnings), 1)
         self.assertEqual(warnings[0]["code"], "invalid_image_candidate")
         self.assertEqual(warnings[0]["result_index"], 2)

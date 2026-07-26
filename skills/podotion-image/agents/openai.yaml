@@ -1,0 +1,4 @@
+interface:
+  display_name: "Podotion Image"
+  short_description: "Generate, edit, and manage Podotion images"
+  default_prompt: "Use $podotion-image to generate an image from my description."

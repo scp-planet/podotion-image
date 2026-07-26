@@ -36,13 +36,19 @@ class CliIntegrationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def provider(self, base_url: str, token: str = "sk-test-direct"):
+    def provider(
+        self,
+        base_url: str,
+        token: str = "sk-test-direct",
+        token_4k: str | None = None,
+    ):
         return self.module.ProviderConfig(
             provider_id="podotion-direct",
             name="Podotion",
             base_url=base_url,
             bearer_token=token,
             credential_mode="podotion_image_sk",
+            bearer_token_4k=token_4k,
         )
 
     def args(self, **overrides):
@@ -58,6 +64,7 @@ class CliIntegrationTests(unittest.TestCase):
             "image_probe": False,
             "request_key": "test-request-0001",
             "force_new": False,
+            "state_scope": None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -92,6 +99,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(request["body"]["n"], 1)
         self.assertNotIn("response_format", request["body"])
         self.assertEqual(report["provider"]["credential_mode"], "podotion_image_sk")
+        self.assertEqual(report["credential_profile"], "default")
         self.assertEqual(report["request"]["transport"], "images")
         self.assertEqual(report["request"]["size"], "1152x2048")
         self.assertEqual(report["request"]["provider_timeout_seconds"], 600)
@@ -101,6 +109,97 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(report["warnings"][0]["actual_size"], "1x1")
         self.assertTrue(state_exists)
         self.assertEqual(saved_bytes, PNG_BYTES)
+
+    def test_4k_tier_uses_4k_credential_and_preserves_resolution_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
+            [images_response()]
+        ) as server:
+            provider = self.provider(
+                server.base_url, "sk-default-route", "sk-4k-route"
+            )
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                report = self.module.run_generation(
+                    self.args(output_dir=temp_dir, size="4k", ratio="16:9"),
+                    "generate",
+                )
+
+        self.assertEqual(server.requests[0]["authorization"], "Bearer sk-4k-route")
+        self.assertEqual(server.requests[0]["body"]["size"], "3840x2160")
+        self.assertEqual(report["credential_profile"], "4k")
+        self.assertEqual(report["provider"]["credential_profile"], "4k")
+        self.assertEqual(report["request"]["resolved_size"]["requested_tier"], "4k")
+        self.assertEqual(report["request"]["resolved_size"]["width"], 3840)
+
+    def test_intermediate_exact_size_uses_default_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
+            [images_response()]
+        ) as server:
+            provider = self.provider(
+                server.base_url, "sk-default-route", "sk-4k-route"
+            )
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                report = self.module.run_generation(
+                    self.args(output_dir=temp_dir, size="2560x1440"),
+                    "generate",
+                )
+
+        self.assertEqual(server.requests[0]["authorization"], "Bearer sk-default-route")
+        self.assertEqual(server.requests[0]["body"]["size"], "2560x1440")
+        self.assertEqual(report["credential_profile"], "default")
+        self.assertIsNone(report["request"]["resolved_size"]["requested_tier"])
+
+    def test_exact_canonical_4k_size_uses_4k_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
+            [images_response()]
+        ) as server:
+            provider = self.provider(
+                server.base_url, "sk-default-route", "sk-4k-route"
+            )
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                report = self.module.run_generation(
+                    self.args(output_dir=temp_dir, size="2336x3504"),
+                    "generate",
+                )
+
+        self.assertEqual(server.requests[0]["authorization"], "Bearer sk-4k-route")
+        self.assertEqual(report["credential_profile"], "4k")
+
+    def test_max_pixel_noncanonical_size_uses_4k_credential(self) -> None:
+        resolved = self.module.resolve_request_size("3600x2304", None)
+        self.assertNotIn(
+            (resolved.width, resolved.height), self.module.CANONICAL_4K_DIMENSIONS
+        )
+        self.assertEqual(resolved.pixels, self.module.MAX_PIXELS)
+        self.assertEqual(resolved.credential_profile, "4k")
+
+    def test_missing_4k_credential_has_no_output_state_or_network_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "must-not-exist"
+            provider = self.provider("https://ai.podotion.com/v1")
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ), mock.patch.object(
+                self.module, "resolve_output_dir", wraps=self.module.resolve_output_dir
+            ) as resolve_output, mock.patch.object(
+                self.module, "post_images"
+            ) as post:
+                with self.assertRaisesRegex(RuntimeError, "PodotionImage4kSk"):
+                    self.module.run_generation(
+                        self.args(
+                            output_dir=str(output), size="4k", ratio="1:1"
+                        ),
+                        "generate",
+                    )
+
+            resolve_output.assert_not_called()
+            post.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_last_state_drives_multipart_edit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
@@ -158,7 +257,10 @@ class CliIntegrationTests(unittest.TestCase):
 
         self.assertTrue(report["ok"])
         self.assertEqual(len(report["images"]), 1)
-        self.assertNotIn("_01", Path(report["images"][0]["path"]).name)
+        self.assertRegex(
+            Path(report["images"][0]["path"]).name,
+            r"^\d{8}_\d{6}_\d{6}\.png$",
+        )
         self.assertEqual(report["warnings"], [])
         self.assertEqual(len(output_files), 2)
         self.assertIn(".state", output_files)
@@ -167,7 +269,7 @@ class CliIntegrationTests(unittest.TestCase):
     def test_default_output_directory_is_under_current_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "workspace"
-            expected = workspace.resolve() / "PodotionImage"
+            expected = workspace.resolve() / "PodotionImageOutput"
 
             self.assertEqual(self.module.default_output_dir(workspace), expected)
             self.assertEqual(self.module.resolve_output_dir(None, cwd=workspace), expected)
@@ -263,6 +365,41 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertFalse(report["image_capability"]["attempted"])
         self.assertFalse(any(request["method"] == "POST" for request in server.requests))
 
+    def test_doctor_probes_every_configured_credential_without_posting(self) -> None:
+        with FakeProviderServer([]) as server:
+            provider = self.provider(
+                server.base_url, "sk-doctor-default", "sk-doctor-4k"
+            )
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                report = self.module.run_doctor(self.args())
+
+        get_requests = [item for item in server.requests if item["method"] == "GET"]
+        self.assertEqual(len(get_requests), 2)
+        self.assertEqual(
+            {item["authorization"] for item in get_requests},
+            {"Bearer sk-doctor-default", "Bearer sk-doctor-4k"},
+        )
+        self.assertTrue(report["credential_profiles"]["default"]["reachable"])
+        self.assertTrue(report["credential_profiles"]["4k"]["reachable"])
+        self.assertEqual(report["warnings"], [])
+        self.assertNotIn("sk-doctor", repr(report))
+        self.assertFalse(any(request["method"] == "POST" for request in server.requests))
+
+    def test_doctor_missing_optional_4k_is_only_a_warning(self) -> None:
+        with FakeProviderServer([]) as server:
+            provider = self.provider(server.base_url)
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                report = self.module.run_doctor(self.args())
+
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["credential_profiles"]["4k"]["configured"])
+        self.assertEqual(report["warnings"][0]["code"], "optional_4k_credential_missing")
+        self.assertEqual(sum(item["method"] == "GET" for item in server.requests), 1)
+
     def test_doctor_image_probe_makes_one_billable_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
             [images_response()]
@@ -315,10 +452,36 @@ class CliIntegrationTests(unittest.TestCase):
         missing = run_cli(["generate"], check=False)
         self.assertNotEqual(missing.returncode, 0)
 
+    def test_cli_rejects_ambiguous_size_arguments_before_loading_credentials(self) -> None:
+        tier_without_ratio = run_cli(
+            [
+                "generate", "--prompt", "cat", "--request-key", "size-args-0001",
+                "--size", "2k",
+            ],
+            check=False,
+        )
+        exact_with_ratio = run_cli(
+            [
+                "generate", "--prompt", "cat", "--request-key", "size-args-0002",
+                "--size", "2560x1440", "--ratio", "16:9",
+            ],
+            check=False,
+        )
+        self.assertIn("--ratio is required", tier_without_ratio.stderr)
+        self.assertIn("--ratio cannot be used", exact_with_ratio.stderr)
+        self.assertNotIn("credential file not found", tier_without_ratio.stderr)
+        self.assertNotIn("credential file not found", exact_with_ratio.stderr)
+
     def test_edit_help_has_last_but_no_mask(self) -> None:
         result = run_cli(["edit", "--help"])
         self.assertIn("--last", result.stdout)
         self.assertNotIn("--mask", result.stdout)
+
+    def test_request_commands_expose_state_scope(self) -> None:
+        for command in ("generate", "edit", "request-status", "request-abandon"):
+            with self.subTest(command=command):
+                result = run_cli([command, "--help"])
+                self.assertIn("--state-scope", result.stdout)
 
 
 if __name__ == "__main__":
