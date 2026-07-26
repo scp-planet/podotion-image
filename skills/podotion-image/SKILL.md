@@ -60,10 +60,14 @@ Translate the user's requested output before calling the executor:
 
 - Use `auto` when no resolution or aspect ratio is requested.
 - Use a tier plus ratio for requests expressed as 1K, 2K, or 4K.
+- Treat generic 4K plus a ratio as the highest OpenAI-compatible 4K tier for that ratio. Do not describe every 4K-tier result as UHD 4K; only `3840x2160` and `2160x3840` are UHD 4K.
+- Normalize cinema, DCI-ratio, and `1.90:1` ratio intent to `19:10`. Reject literal `19:6` because it exceeds the 3:1 limit.
 - Pass an exact `WIDTHxHEIGHT` when the user gives pixel dimensions; omit `--ratio` in this form.
 - With only an aspect ratio, use the 1K tier.
 
 Exact dimensions must have a maximum edge of 3840 pixels, both edges divisible by 16, an aspect ratio no wider than 3:1, and 655,360 through 8,294,400 total pixels. If the request violates a constraint, explain it and ask for another size before making a billable call. Do not silently map valid exact dimensions to a tier.
+
+Reject exact DCI 4K `4096x2160`; do not silently resize it. Treat output above 2K as experimental. Use these fixed 4K-tier mappings: `1:1` -> `2880x2880`, `2:3` -> `2336x3504`, `3:2` -> `3504x2336`, `3:4` -> `2448x3264`, `4:3` -> `3264x2448`, `16:9` -> `3840x2160`, `9:16` -> `2160x3840`, `19:10` -> `3648x1920`, and `10:19` -> `1920x3648`.
 
 The executor selects the credential from structured size intent and final dimensions. Do not choose or expose a key in shell code. In particular, exact `2560x1440` uses the default profile, while explicit 4K and `3840x2160` use the 4K profile.
 

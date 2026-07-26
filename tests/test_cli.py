@@ -133,6 +133,26 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(report["request"]["resolved_size"]["requested_tier"], "4k")
         self.assertEqual(report["request"]["resolved_size"]["width"], 3840)
 
+    def test_cinematic_4k_ratio_uses_fixed_size_and_4k_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
+            [images_response()]
+        ) as server:
+            provider = self.provider(
+                server.base_url, "sk-default-route", "sk-4k-route"
+            )
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                report = self.module.run_generation(
+                    self.args(output_dir=temp_dir, size="4k", ratio="19:10"),
+                    "generate",
+                )
+
+        self.assertEqual(server.requests[0]["authorization"], "Bearer sk-4k-route")
+        self.assertEqual(server.requests[0]["body"]["size"], "3648x1920")
+        self.assertEqual(report["credential_profile"], "4k")
+        self.assertEqual(report["request"]["resolved_size"]["requested_ratio"], "19:10")
+
     def test_intermediate_exact_size_uses_default_credential(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
             [images_response()]
@@ -479,6 +499,31 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertIn("--ratio cannot be used", exact_with_ratio.stderr)
         self.assertNotIn("credential file not found", tier_without_ratio.stderr)
         self.assertNotIn("credential file not found", exact_with_ratio.stderr)
+
+    def test_cli_rejects_dci_4k_and_overwide_ratio_before_loading_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "must-not-exist"
+            dci_4k = run_cli(
+                [
+                    "generate", "--prompt", "cat", "--request-key", "size-args-0003",
+                    "--size", "4096x2160", "--output-dir", str(output),
+                ],
+                check=False,
+            )
+            overwide = run_cli(
+                [
+                    "generate", "--prompt", "cat", "--request-key", "size-args-0004",
+                    "--size", "4k", "--ratio", "19:6", "--output-dir", str(output),
+                ],
+                check=False,
+            )
+
+            self.assertFalse(output.exists())
+
+        self.assertIn("exceeds 3840px", dci_4k.stderr)
+        self.assertIn("unsupported ratio", overwide.stderr)
+        self.assertNotIn("credential file not found", dci_4k.stderr)
+        self.assertNotIn("credential file not found", overwide.stderr)
 
     def test_edit_help_has_last_but_no_mask(self) -> None:
         result = run_cli(["edit", "--help"])

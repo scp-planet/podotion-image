@@ -93,6 +93,37 @@ class StandaloneRuntimeTests(unittest.TestCase):
                 with self.assertRaises(Exception):
                     self.module.resolve_request_size(value, None)
 
+    def test_4k_tier_uses_stable_openai_compatible_ratio_mapping(self) -> None:
+        expected = {
+            "1:1": (2880, 2880),
+            "2:3": (2336, 3504),
+            "3:2": (3504, 2336),
+            "3:4": (2448, 3264),
+            "4:3": (3264, 2448),
+            "16:9": (3840, 2160),
+            "9:16": (2160, 3840),
+            "19:10": (3648, 1920),
+            "10:19": (1920, 3648),
+        }
+
+        self.assertEqual(self.module.FOUR_K_DIMENSIONS_BY_RATIO, expected)
+        self.assertEqual(
+            self.module.CANONICAL_4K_DIMENSIONS,
+            frozenset(expected.values()),
+        )
+        for ratio, dimensions in expected.items():
+            with self.subTest(ratio=ratio):
+                resolved = self.module.resolve_size("4k", ratio)
+                self.assertEqual((resolved.width, resolved.height), dimensions)
+                self.assertEqual(resolved.value, f"{dimensions[0]}x{dimensions[1]}")
+                self.assertEqual(resolved.credential_profile, "4k")
+
+    def test_dci_4k_and_overwide_ratio_remain_unsupported(self) -> None:
+        with self.assertRaisesRegex(Exception, "exceeds 3840px"):
+            self.module.resolve_request_size("4096x2160", None)
+        with self.assertRaisesRegex(Exception, "unsupported ratio"):
+            self.module.normalize_ratio("19:6")
+
     def test_credential_routing_covers_all_rules(self) -> None:
         for ratio in self.module.SUPPORTED_RATIOS:
             with self.subTest(tier="4k", ratio=ratio):

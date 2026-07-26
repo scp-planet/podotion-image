@@ -75,6 +75,8 @@ SUPPORTED_RATIOS = {
     "4:3": (4, 3),
     "16:9": (16, 9),
     "9:16": (9, 16),
+    "19:10": (19, 10),
+    "10:19": (10, 19),
 }
 
 MAX_EDGE = 3840
@@ -82,17 +84,18 @@ MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MULTIPLE = 16
 
-CANONICAL_4K_DIMENSIONS = frozenset(
-    {
-        (2880, 2880),
-        (2336, 3504),
-        (3504, 2336),
-        (2448, 3264),
-        (3264, 2448),
-        (3840, 2160),
-        (2160, 3840),
-    }
-)
+FOUR_K_DIMENSIONS_BY_RATIO = {
+    "1:1": (2880, 2880),
+    "2:3": (2336, 3504),
+    "3:2": (3504, 2336),
+    "3:4": (2448, 3264),
+    "4:3": (3264, 2448),
+    "16:9": (3840, 2160),
+    "9:16": (2160, 3840),
+    "19:10": (3648, 1920),
+    "10:19": (1920, 3648),
+}
+CANONICAL_4K_DIMENSIONS = frozenset(FOUR_K_DIMENSIONS_BY_RATIO.values())
 
 
 @dataclass(frozen=True)
@@ -314,6 +317,18 @@ def resolve_size(tier: str, ratio: str) -> ResolvedSize:
     if ratio not in SUPPORTED_RATIOS:
         choices = ", ".join(SUPPORTED_RATIOS)
         raise ValueError(f"unsupported ratio {ratio!r}; choose one of: {choices}")
+
+    if tier == "4k":
+        width, height = FOUR_K_DIMENSIONS_BY_RATIO[ratio]
+        validate_dimensions(width, height)
+        return ResolvedSize(
+            value=f"{width}x{height}",
+            requested_size=tier,
+            requested_tier=tier,
+            requested_ratio=ratio,
+            width=width,
+            height=height,
+        )
 
     width_ratio, height_ratio = SUPPORTED_RATIOS[ratio]
     target_long = SUPPORTED_TIERS[tier]

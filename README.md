@@ -102,7 +102,25 @@ configure_direct.py --set-4k --stdin --force
 - 长边与短边之比不超过 3:1。
 - 总像素不少于 655,360 且不超过 8,294,400。
 
-来源：[OpenAI Image generation](https://developers.openai.com/api/docs/guides/image-generation)。
+来源：[OpenAI Image generation](https://developers.openai.com/api/docs/guides/image-generation) 与 [gpt-image-2 size options](https://developers.openai.com/cookbook/examples/multimodal/image-gen-models-prompting-guide#gpt-image-2-size-options)。
+
+`gpt-image-2` 在上述限制内支持任意 `WIDTHxHEIGHT`，但大于 2K 的输出仍属于实验性能力。这里的 `4K` 表示“OpenAI 限制内、符合目标比例的最高分辨率档”，不是在所有比例下都强制使用某个固定边长。只有 `3840x2160` 和 `2160x3840` 是 UHD 4K；电影级 DCI 4K `4096x2160` 超过 3840 像素边长限制，不能直接请求，也不会被静默缩小。
+
+用户只给出“4K + 比例”时，Skill 使用以下固定映射：
+
+| 比例 | OpenAI 兼容的 4K 档尺寸 |
+| --- | --- |
+| `1:1` | `2880x2880` |
+| `2:3` | `2336x3504` |
+| `3:2` | `3504x2336` |
+| `3:4` | `2448x3264` |
+| `4:3` | `3264x2448` |
+| `16:9` | `3840x2160`（UHD 4K） |
+| `9:16` | `2160x3840`（UHD 4K） |
+| `19:10` | `3648x1920` |
+| `10:19` | `1920x3648` |
+
+“电影比例”“DCI 比例”和 `1.90:1` 作为粗略比例意图时按 `19:10` 处理；精确请求 `4096x2160` 仍会因越界而拒绝。字面比例 `19:6` 超过 3:1 限制，不受支持。
 
 | 用户意图或最终尺寸 | 请求形式 | SK |
 | --- | --- | --- |
