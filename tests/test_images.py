@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import importlib.util
 import sys
 import tempfile
@@ -67,6 +66,7 @@ class ImagesPayloadTests(unittest.TestCase):
         self.assertEqual(fields["size"], "1152x2048")
         self.assertEqual(fields["quality"], "auto")
         self.assertEqual(fields["output_format"], "png")
+        self.assertEqual(fields["n"], "1")
         self.assertEqual(len(images), 2)
         self.assertTrue(all(part["content_type"] == "image/png" for part in images))
         self.assertTrue(all(part["data"] == PNG_BYTES for part in images))
@@ -82,58 +82,75 @@ class ImagesPayloadTests(unittest.TestCase):
         self.assertEqual(results[0].value, PNG_B64)
         self.assertEqual(results[0].source, "$.data[0].b64_json")
 
-    def test_text_result_beside_valid_image_is_not_a_candidate(self) -> None:
+    def test_b64_json_takes_precedence_over_url_in_the_same_item(self) -> None:
         results = self.module.extract_image_results(
             {
                 "data": [
-                    {"b64_json": PNG_B64, "result": "completed"},
-                    {"result": "this is metadata, not image base64"},
+                    {
+                        "b64_json": PNG_B64,
+                        "url": "https://example.com/the-same-image.png",
+                    }
                 ]
             }
         )
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].value, PNG_B64)
+        self.assertEqual(results[0].kind, "base64")
+        self.assertEqual(results[0].source, "$.data[0].b64_json")
 
-    def test_nonstandard_top_level_result_fields_are_rejected(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "Images API"):
-            self.module.extract_image_results(
-                {"b64_json": PNG_B64, "result": "completed"}
-            )
-
-    def test_valid_candidate_survives_invalid_declared_candidate_with_warning(self) -> None:
+    def test_url_is_used_only_when_b64_json_is_absent(self) -> None:
         results = self.module.extract_image_results(
-            {
-                "data": [
-                    {"b64_json": PNG_B64},
-                    {"b64_json": "not-image-base64"},
-                ]
-            }
+            {"data": [{"url": "https://example.com/generated.png"}]}
         )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].kind, "url")
+        self.assertEqual(results[0].source, "$.data[0].url")
+
+    def test_nonstandard_or_non_single_image_responses_are_rejected(self) -> None:
+        cases = {
+            "top-level-result": {"b64_json": PNG_B64},
+            "images-wrapper": {"images": [{"b64_json": PNG_B64}]},
+            "nested-response": {"response": {"data": [{"b64_json": PNG_B64}]}},
+            "empty-data": {"data": []},
+            "multiple-data": {
+                "data": [{"b64_json": PNG_B64}, {"b64_json": PNG_B64}]
+            },
+            "non-object-item": {"data": [PNG_B64]},
+            "missing-image-field": {"data": [{"result": "completed"}]},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(case=name), self.assertRaisesRegex(
+                RuntimeError, "ImagesResponse"
+            ):
+                self.module.extract_image_results(payload)
+
+    def test_single_result_is_decoded_and_saved_once(self) -> None:
+        results = self.module.extract_image_results({"data": [{"b64_json": PNG_B64}]})
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir)
-            saved, warnings = self.module.save_image_results(results, output)
+            with mock.patch.object(
+                self.module,
+                "_decode_image_result",
+                wraps=self.module._decode_image_result,
+            ) as decode:
+                saved, warnings = self.module.save_image_results(results, output)
             files = [path for path in output.iterdir() if path.is_file()]
             saved_bytes = saved[0].path.read_bytes()
             saved_path_matches = files[0].samefile(saved[0].path)
 
+        decode.assert_called_once_with(results[0], self.module.TIMEOUT_SECONDS)
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved_bytes, PNG_BYTES)
         self.assertEqual(len(files), 1)
         self.assertTrue(saved_path_matches)
         self.assertRegex(saved[0].path.name, r"^\d{8}_\d{6}_\d{6}\.png$")
-        self.assertEqual(len(warnings), 1)
-        self.assertEqual(warnings[0]["code"], "invalid_image_candidate")
-        self.assertEqual(warnings[0]["result_index"], 2)
-        self.assertEqual(warnings[0]["candidate_count"], 2)
-        self.assertEqual(warnings[0]["source"], "$.data[1].b64_json")
-        self.assertEqual(warnings[0]["value_length"], len("not-image-base64"))
-        self.assertNotIn("not-image-base64", str(warnings[0]))
+        self.assertEqual(warnings, [])
 
-    def test_all_invalid_candidates_leave_no_files_and_have_safe_details(self) -> None:
-        results = self.module.extract_image_results(
-            {"data": [{"b64_json": "bad!"}, {"url": "not-a-url"}]}
-        )
+    def test_invalid_single_result_leaves_no_files_and_has_safe_details(self) -> None:
+        results = self.module.extract_image_results({"data": [{"b64_json": "bad!"}]})
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir)
             with self.assertRaises(self.module.ImageCandidateError) as raised:
@@ -141,31 +158,17 @@ class ImagesPayloadTests(unittest.TestCase):
             leftovers = list(output.iterdir())
 
         self.assertEqual(leftovers, [])
-        self.assertEqual(raised.exception.details["candidate_count"], 2)
-        self.assertEqual(len(raised.exception.details["invalid_candidates"]), 2)
+        self.assertEqual(raised.exception.details["candidate_count"], 1)
+        self.assertEqual(len(raised.exception.details["invalid_candidates"]), 1)
         self.assertNotIn("bad!", str(raised.exception.details))
-        self.assertNotIn("not-a-url", str(raised.exception.details))
 
-    def test_commit_failure_rolls_back_staged_and_committed_files(self) -> None:
-        second_png = base64.b64encode(PNG_BYTES + b"trailing-test-data").decode("ascii")
-        results = self.module.extract_image_results(
-            {"data": [{"b64_json": PNG_B64}, {"b64_json": second_png}]}
-        )
-        real_replace = self.module.os.replace
-        replace_calls = 0
-
-        def fail_second_replace(source, destination):
-            nonlocal replace_calls
-            replace_calls += 1
-            if replace_calls == 2:
-                raise OSError("simulated commit failure")
-            return real_replace(source, destination)
-
+    def test_commit_failure_removes_the_staged_single_image(self) -> None:
+        results = self.module.extract_image_results({"data": [{"b64_json": PNG_B64}]})
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
-            self.module.os, "replace", side_effect=fail_second_replace
+            self.module.os, "replace", side_effect=OSError("simulated commit failure")
         ):
             output = Path(temp_dir)
-            with self.assertRaisesRegex(RuntimeError, "atomically save"):
+            with self.assertRaisesRegex(RuntimeError, "atomically save the decoded image"):
                 self.module.save_image_results(results, output)
             leftovers = list(output.iterdir())
 

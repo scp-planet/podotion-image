@@ -19,6 +19,19 @@ Resolve `<skill_dir>` as the directory containing this `SKILL.md`. Keep the acti
 
 Do not install packages. If Python 3.11+ is unavailable, report that prerequisite instead of changing runtimes or downloading an interpreter.
 
+## First-image preflight
+
+Before the first generate or edit action in every new task, run `configure_direct.py --check` and `manage.py status`. Both checks are local and read-only: they must not contact Podotion, print credential values, write files, or create an image request. Run them once per task, not before every image action.
+
+For a multi-image request, resolve every requested image's size and credential profile before the first billable call. If any image needs an unavailable credential, complete credential onboarding before generating any image; do not leave the user with a partially generated batch followed by a configuration restart.
+
+- If the configuration check is missing or invalid, request the default credential as described below and do not invoke an image action.
+- If the current action routes to 4K and `credential_profiles.4k` is false, request only the 4K credential. A valid default-only config remains ready for non-4K actions.
+- If `legacy_plugin.detected` and `legacy_plugin.safe_to_remove` are both true, tell the user that the old Plugin is still installed and ask whether to migrate it. Ask again on the first image action of every new task until migration succeeds; a refusal applies only to the current task. If the user declines and the needed credential profile is valid, continue the requested image action with the standalone Skill.
+- If a legacy installation is detected but `safe_to_remove` is false, report the sanitized status and do not ask for cleanup confirmation or attempt cleanup.
+
+When a credential prompt and a safe legacy migration prompt are both needed, ask for the required assignment lines and the migration yes/no decision in one response.
+
 ## Credentials
 
 Read credentials only through the executor. They live at `$CODEX_HOME/podotion-image/provider.toml`, falling back to the current platform's `~/.codex/podotion-image/provider.toml`.
@@ -26,11 +39,20 @@ Read credentials only through the executor. They live at `$CODEX_HOME/podotion-i
 - `PodotionImageSk` is required and handles `auto`, 1K, 2K, and non-4K exact sizes.
 - `PodotionImage4kSk` handles explicit 4K-tier requests, canonical 4K-tier dimensions, and exact sizes with at least 8,294,400 pixels.
 
-Legacy files containing only `PodotionImageSk` remain valid for non-4K work. A 4K request without `PodotionImage4kSk` must fail before any output directory, request state, or provider request is created. Never fall back to the default key.
+Legacy files containing only `PodotionImageSk` remain valid for non-4K work. A 4K request without `PodotionImage4kSk` must fail before any output directory, request state, or provider request is created. Never fall back to the default key, and do not request a 4K key until the user asks for a 4K-routed image.
 
-Never print, inspect, return, log, or place either key in an argument. Configure both keys by sending the default key on stdin line 1 and the optional 4K key on line 2 to `configure_direct.py --stdin --force`. To add only the 4K key to a valid legacy config, send one line to `configure_direct.py --set-4k --stdin --force`. Run `podotion_image.py doctor` afterward. Never run `--image-probe` without explicit authorization because it is billable.
+Accept credential input in either of these forms:
 
-Run `doctor` after configuring credentials or when the user explicitly asks for diagnostics. Do not run it before each ordinary image action.
+- An inline `PodotionImageSk=<value>` or `PodotionImage4kSk=<value>` line in the user's current message.
+- A UTF-8 text attachment containing the same `KEY=value` line format. Accept at most the two recognized keys and reject unrelated content.
+
+Recommend an attachment when practical. It avoids placing the literal key in the chat prompt or process argv, but its contents still become input to the current Codex session; do not describe it as an out-of-session secret channel. Inline input is also accepted when the user prefers it.
+
+Never repeat a credential in commentary, commands, logs, or the final response. Send an inline assignment block unchanged through process stdin to `configure_direct.py --stdin --force`. When the host exposes an attachment as a local path, pass only that path to `configure_direct.py --input-file <path> --force`; if no path is available, send the attachment content through stdin. To add only 4K to an existing config, add `--set-4k`. If multiple attachments could contain credentials, ask which one to use. Never scan unrelated files.
+
+After any successful credential write, run non-billable `podotion_image.py doctor` without `--image-probe`. If doctor fails, do not migrate or generate; report the sanitized failure. If doctor succeeds and the user accepted a safe legacy migration, run `manage.py uninstall-legacy-plugin --yes`. After configuration and any accepted migration finish, stop without generating the requested image; tell the user to restart Codex, create a new task, and repeat the image request.
+
+Run `doctor` after writing credentials, when the user explicitly asks for diagnostics, or immediately before an accepted legacy Plugin cleanup with an already-valid config. Do not run it before each ordinary image action. Never run `--image-probe` without explicit authorization because it is billable.
 
 ## Resolve size
 
@@ -51,7 +73,7 @@ Before the first image action in a task, establish one stable `state_scope`. Pre
 
 Generate a new UUID `request_key` for each distinct image action. Reuse the same key when checking or recovering that action. Pass `--state-scope` and `--request-key` to every image or recovery command.
 
-Use `--force-new` only when the user explicitly requests an independent variation with otherwise identical inputs. Never rerun a billable command with a new key because a process is quiet, the UI disconnects, or result rendering fails.
+Use `--force-new` only when the user explicitly requests an independent variation with otherwise identical inputs. A request for multiple variations explicitly authorizes this: the second and subsequent identical-prompt actions use new request keys plus `--force-new`. Never rerun a billable command with a new key because a process is quiet, the UI disconnects, or result rendering fails.
 
 ## Output location
 
@@ -82,15 +104,25 @@ podotion_image.py edit --prompt-file - (--last | --image <path> ...) --size <tie
 
 Each image action uses one upstream POST with a fixed 600-second timeout and no automatic HTTP retry. Allow the command to remain quiet for several minutes.
 
+Every executor invocation requests exactly one image with `n=1` and accepts exactly one top-level Images API `data[]` item. Never ask one invocation to return multiple images. If the response has zero or multiple `data[]` items, treat it as a completed-but-unusable protocol error; do not inspect nonstandard `images` or nested `response` wrappers and do not retry.
+
+When the user requests multiple images:
+
+- Require an explicit count from 1 through 10; ask for the count when it is missing, and ask the user to split requests above 10 into separate tasks.
+- Resolve all prompts, sizes, credentials, and output locations before the first billable call.
+- Run one complete image action at a time. Wait until its single image is decoded, atomically saved, and durably recorded before starting the next action. Never launch these actions in parallel.
+- Reuse the task's `state_scope`, but assign each action a new `request_key`. Add `--force-new` to the second and later actions when their effective prompts and other inputs are identical.
+- Stop immediately after any failure, disconnect, unknown result, or completed-but-unusable result. Preserve earlier successful images, report the failed one-based position and sanitized status, and do not start the remaining actions.
+
 ## Recovery
 
-After a disconnect or unknown result, run `request-status` with the same `request_key`, `state_scope`, and `output_dir`. Never start another billable request while status is active, unknown, or completed-but-unusable.
+After a disconnect or unknown result, run `request-status` with the same `request_key`, `state_scope`, and `output_dir`. Never start another billable request, including the next action in a multi-image sequence, while status is active, unknown, or completed-but-unusable.
 
 Use `request-abandon --acknowledge-possible-charge` only after the user explicitly acknowledges that the uncertain request may already have been billed.
 
 ## Deliver results
 
-For every successful item in `images[]`:
+Each successful executor result has exactly one item in `images[]`. For every successful image, including earlier images from a stopped multi-image sequence:
 
 1. Embed `images[].markdown_path` as a Markdown image in the final response.
 2. Add a separate absolute local file link to `images[].path`.
@@ -104,12 +136,12 @@ Run lifecycle commands only when the user explicitly requests them:
 
 - Status: `manage.py status`.
 - Update: run `manage.py update --dry-run`, then `manage.py update`.
-- Legacy Plugin migration: after the standalone Skill passes non-billable `doctor`, run `manage.py uninstall-legacy-plugin --yes`. It removes only the detected `podotion-image@<marketplace>` registration and the exact legacy Marketplace/source entries; it safely skips when the old Plugin is absent and preserves credentials, the new Skill, images, and request state.
+- Legacy Plugin migration: after the user accepts the current task's migration prompt, run non-billable `podotion_image.py doctor` without `--image-probe`. Only when that current doctor succeeds, run `manage.py uninstall-legacy-plugin --yes`. Do not rely on a doctor result from another task. The command removes only the detected `podotion-image@<marketplace>` registration and exact legacy Marketplace/source entries; it safely skips when absent and preserves credentials, the new Skill, images, and request state.
 - Uninstall: explain that credentials and generated images are preserved, obtain explicit confirmation, then run `manage.py uninstall --yes`.
 
 Do not ask the user to run `codex plugin remove`, edit `marketplace.json`, or delete the legacy source manually. The migration command owns that workflow and refuses same-name entries from another source.
 
-Updates use only the fixed official repository and replace the installed Skill transactionally. After update, migration, or uninstall, tell the user to restart Codex and create a new task. Do not continue using replaced or removed Skill code in the current task.
+Updates use only the fixed official repository and replace the installed Skill transactionally. After update, migration, uninstall, or completed credential onboarding, stop; tell the user to restart Codex and create a new task. Do not continue using replaced or removed Skill code, and do not generate an image after configuration or migration in the current task.
 
 ## Failures
 

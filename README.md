@@ -10,7 +10,8 @@ Skill 的完整运行边界位于 `skills/podotion-image`。安装后不需要 P
 - 显式 4K 档、规范 4K 档尺寸或总像素达到 8,294,400 时使用 `PodotionImage4kSk`。
 - 旧单 SK 配置继续支持非 4K 请求；4K SK 缺失时在联网和写请求状态前失败，不回退默认 SK。
 - 用户给出的合法精确像素尺寸会原样发送，不映射到最近档位。
-- 每个图片操作最多发送一次上游 POST，不自动重试；请求超时固定为 600 秒。
+- 每次上游请求固定 `n=1` 且只接受一张标准 `data[]` 结果；每个图片操作最多发送一次 POST，不自动重试，请求超时固定为 600 秒。
+- 用户需要多张图片时由 Skill 最多串行执行 10 个独立图片操作，绝不并行；任一操作失败或结果不确定时立即停止，保留此前成功图片。
 - 图片保存在用户工作区，并在回复正文中提供 Markdown 预览和绝对文件链接。
 - `doctor` 只做配置和连通性检查，不计费；`doctor --image-probe` 会真实生图并可能计费。
 
@@ -40,21 +41,31 @@ Skill 的完整运行边界位于 `skills/podotion-image`。安装后不需要 P
 
 ## 使用 Skills Install 首次安装
 
-将下面整段提示词发给 Codex，并替换两个占位符：
+将下面两行发给 Codex；安装阶段不提交或配置任何 SK：
 
 ```text
-请使用内置 skill-installer 从 https://github.com/scp-planet/podotion-image/tree/main/skills/podotion-image 安装 podotion-image Skill。不要安装整个仓库，也不要注册 Plugin 或 MCP。安装器如果报告目标目录已存在，停止首次安装并改用已安装 Skill 的 manage.py update，不要覆盖目录。
-
-安装后使用当前平台原生 Python 运行安装目录中的 scripts/configure_direct.py --stdin --force：原生 Windows 使用 py -3，macOS、Linux 和 WSL 使用 python3。仅把下面两行通过该进程的标准输入传入，不得把 SK 放入命令行参数、日志或回复；第一行是默认 SK，第二行是 4K SK：
-{{PodotionImageSk}}
-{{PodotionImage4kSk}}
-
-然后运行不计费的 scripts/podotion_image.py doctor，不得运行 --image-probe。doctor 成功后，运行 scripts/manage.py uninstall-legacy-plugin --yes；该命令负责检测并卸载旧的 podotion-image@personal Plugin，未检测到旧 Plugin 时应安全跳过，不要要求我手工编辑 Marketplace 或删除目录。最后只报告脱敏状态，并提示我重启 Codex、新建任务。
+$skill-installer
+https://github.com/scp-planet/podotion-image/tree/main/skills/podotion-image
 ```
+
+安装完成后重启 Codex 并新建任务。不要在安装任务中发送 SK、配置凭据、运行 `doctor` 或迁移旧 Plugin；这些动作会在首次真实图片任务中按需处理。安装器如果报告目标目录已存在，停止首次安装并改用已安装 Skill 的 `manage.py update`，不要覆盖目录。
 
 标准 `skill-installer` 对公开 GitHub 仓库默认可直接下载 ZIP，并在需要时使用它自己的 Git fallback。首次安装的传输行为由系统安装器管理；下文的固定浅克隆和 Schannel 策略专用于安装后的自更新。
 
-## 凭据与旧配置
+## 首次图片任务预检与凭据
+
+每个新任务的第一次生成或编辑之前，Skill 先运行本地、只读的 `configure_direct.py --check` 和 `manage.py status`。预检不访问 Podotion、不生成图片、不写文件，也不输出 SK；同一任务后续图片操作不重复运行。
+
+- 如果默认凭据尚未配置，Skill 先索取 `PodotionImageSk`，不发起图片请求。
+- 如果用户请求 4K 而配置中缺少 4K 凭据，Skill 只索取 `PodotionImage4kSk`；非 4K 请求不要求 4K SK。
+- 如果检测到可安全自动清理的旧 Plugin，Skill 在每个新任务首次预检时询问是否迁移。用户本任务拒绝后可以继续使用 standalone Skill，但下一个新任务仍会再次询问，直到迁移完成；检测结果不安全或不明确时只报告脱敏状态，不询问或尝试清理。
+
+凭据可以用以下任一方式提供：
+
+- 在当前消息中写一行 `PodotionImageSk=<value>` 或 `PodotionImage4kSk=<value>`。
+- 附加一个 UTF-8 文本文件，内容使用相同的 `KEY=value` 行；同时配置两个 profile 时每个 key 各占一行，且不包含其他字段。
+
+附件方式避免把 SK 字面量放进聊天提示正文或进程命令行参数，但附件内容仍是当前 Codex 会话的输入，并不是会话外的秘密通道。正文中的赋值块会原样通过配置器 stdin 解析；附件有本地路径时使用 `--input-file` 直接读取，没有路径时才把附件内容通过 stdin 传递。Skill 不在回复、命令参数或日志中复述 SK，也不会扫描其他文件。
 
 配置文件位于 `$CODEX_HOME/podotion-image/provider.toml`；`CODEX_HOME` 未设置时使用当前原生平台的 `~/.codex/podotion-image/provider.toml`。该文件在 Skill 安装目录和 Git 仓库之外。
 
@@ -66,13 +77,21 @@ PodotionImageSk = "<default>"
 PodotionImage4kSk = "<4k>"
 ```
 
-旧文件只有 `PodotionImageSk` 时会被原位读取，不需要复制或扫描 Plugin cache。补充 4K SK 时，使用隐藏交互输入，或把一行 SK 通过 stdin 传给：
+旧文件只有 `PodotionImageSk` 时会被原位读取，不需要复制或扫描 Plugin cache。正文配置把一个或两个 `KEY=value` 赋值行通过 stdin 交给：
+
+```text
+configure_direct.py --stdin --force
+```
+
+按需补充 4K SK 时，把 `PodotionImage4kSk=<value>` 作为一行标准输入传给：
 
 ```text
 configure_direct.py --set-4k --stdin --force
 ```
 
-全量配置仍使用 `configure_direct.py --stdin --force`：第一行默认 SK，第二行可选 4K SK。配置写入使用同目录临时文件和原子替换；状态、doctor 和错误输出不会包含 SK。
+附件配置使用 `configure_direct.py --input-file <attachment-path> --force`；仅补充 4K 时再加 `--set-4k`。配置写入使用同目录临时文件和原子替换，附件原文件不会被修改或删除。
+
+任何成功的配置写入后，Skill 都会在当前任务运行不带 `--image-probe` 的非计费 `doctor`；doctor 成功且用户已经同意迁移时，再自动清理旧 Plugin。完成配置和可选迁移后停止当前任务，提示用户重启 Codex 并新建任务，不继续原始生图。doctor 失败时不迁移、不生图，只报告脱敏错误。
 
 ## 分辨率与 SK 路由
 
@@ -97,7 +116,7 @@ configure_direct.py --set-4k --stdin --force
 
 ## 使用
 
-安装并重启后直接描述任务：
+安装并重启后直接描述任务。Skill 会先完成本任务唯一一次本地预检；若需要写入凭据，它会先完成非计费 doctor 和已授权的旧版迁移，再停止并要求用户重启、新建任务、重新提出图片请求：
 
 ```text
 生成一张 2560x1440 的绿色山谷头图，保存到 assets/generated。
@@ -110,6 +129,10 @@ configure_direct.py --set-4k --stdin --force
 相对输出目录以活动项目 workspace 为基准；无项目任务使用 conversation workspace；未指定时使用 `<workspace>/PodotionImageOutput`。存在多个合理路径或编辑源时，Skill 会在计费请求前询问。
 
 同一任务复用稳定的 `state_scope`，每个独立图片操作使用新的 `request_key`。断连后使用同一组标识运行 `request-status`，不要换 key 重发。只有用户明确承认请求可能已计费时，才运行 `request-abandon --acknowledge-possible-charge`。
+
+每次 `generate` 或 `edit` 都显式请求 `n=1`。执行器只读取标准 Images API 顶层 `data` 数组，并要求它恰好包含一个图片对象；同一对象优先使用 `b64_json`，仅在缺失时才使用 `url`。不会扫描非标准 `images`、嵌套 `response` 或把同一对象的两个表示当成两张图片。响应数量不符合单图契约时，在保存 PNG 前按不可用结果停止，且不会自动重试。
+
+需要多张图片时，请明确给出 1 到 10 的数量。Skill 会在首次计费调用前一次性确认所有图片的提示词、尺寸、凭据路由和输出目录，然后逐张串行执行：上一张完成解码、原子保存和请求状态落盘后才开始下一张。每张使用独立 `request_key`；相同提示词的第二张及以后使用 `--force-new`，避免复用第一张。任一张失败、断连或状态不确定时，后续图片不再执行，已成功图片继续保留并在回复中列出。
 
 ## 状态、更新和卸载
 
@@ -127,13 +150,17 @@ manage.py uninstall --yes
 
 仅在原生 Windows 的 Git 输出明确是 Schannel TLS 错误时，更新器才以单条 `git -c http.sslBackend=openssl clone ...` 重试。它不会修改持久 Git 配置、切换所有 Git 请求或关闭证书校验。
 
-`uninstall-legacy-plugin --yes` 用于从旧 Plugin 迁移。它读取旧 Marketplace 名称并调用对应的 `codex plugin remove podotion-image@<marketplace>`（通常是 `podotion-image@personal`），只删除旧安装器创建的精确 Marketplace 条目和 `~/plugins/podotion-image` source；同名但来源不同的条目会被拒绝。旧 Plugin 不存在时命令安全跳过。凭据、新 Skill、工作区图片和请求状态不在清理范围内。
+`uninstall-legacy-plugin --yes` 用于从旧 Plugin 迁移。每个新任务的首次图片预检只要仍检测到可安全清理的旧 Plugin，就会询问用户是否迁移；拒绝只对当前任务有效。用户同意后，Skill 必须先在本任务运行不计费的 `podotion_image.py doctor`，且不得使用 `--image-probe`。只有 doctor 成功才运行清理；doctor 失败时保留旧 Plugin 并停止迁移。
+
+清理命令读取旧 Marketplace 名称并调用对应的 `codex plugin remove podotion-image@<marketplace>`（通常是 `podotion-image@personal`），只删除旧安装器创建的精确 Marketplace 条目和 `~/plugins/podotion-image` source；同名但来源不同的条目会被拒绝。旧 Plugin 不存在时命令安全跳过。凭据、新 Skill、工作区图片和请求状态不在清理范围内。迁移成功后立即停止当前任务，提示重启 Codex 并新建任务，不在旧任务中继续生图。
 
 `uninstall --yes` 只移除 `$CODEX_HOME/skills/podotion-image`。凭据、工作区图片和请求状态一律保留；v1 不提供 purge。更新或任一卸载操作后必须重启 Codex 并新建任务。
 
 ## 从旧 Plugin 迁移
 
-旧 Plugin 和 standalone Skill 使用相同凭据路径，因此新 Skill 会自动复用默认 SK。使用上方安装提示词即可完成迁移：它安装 standalone Skill、写入双 SK、运行非计费 `doctor`，然后调用 `manage.py uninstall-legacy-plugin --yes` 清理旧 Plugin。
+旧 Plugin 和 standalone Skill 使用相同凭据路径，因此新 Skill 会自动复用已有默认 SK。安装提示词只安装 Skill，不接收凭据，也不清理旧 Plugin。重启后的每个新任务会在首次图片预检中检测旧 Plugin 并询问是否迁移。
+
+用户同意迁移时，Skill 在当前任务运行非计费 `doctor`；不能依赖另一个任务中的旧结果。若同时新增或修改凭据，则先原子写入配置，再运行 doctor。doctor 成功后才调用 `manage.py uninstall-legacy-plugin --yes`；配置或迁移完成后停止并要求重启、新建任务，不执行原始生图。
 
 迁移命令会保留个人 Marketplace 中的其他 Plugin，并拒绝删除任何同名但 source 不是 `./plugins/podotion-image` 的条目。用户不需要手工运行 `codex plugin remove`、编辑 `marketplace.json` 或删除旧 source。完成后只需重启 Codex 并新建任务。
 

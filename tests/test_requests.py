@@ -155,7 +155,7 @@ class ProviderRequestTests(unittest.TestCase):
         self.assertEqual(png_files, [])
         self.assertEqual(status["effective_status"], "completed_unusable")
 
-    def test_state_write_failure_rolls_back_saved_image_batch(self) -> None:
+    def test_state_write_failure_rolls_back_the_saved_image(self) -> None:
         response = {"data": [{"b64_json": PNG_B64}]}
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
             self.module, "load_direct_provider", return_value=self.provider()

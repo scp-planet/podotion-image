@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tests.support import SKILL_ROOT
@@ -76,6 +77,145 @@ class SkillLifecycleTests(unittest.TestCase):
         self.assertTrue(report["managed_install"])
         self.assertTrue(report["credential"]["configured"])
         self.assertNotIn(secret, json.dumps(report))
+
+    def test_status_reports_absent_legacy_plugin_as_not_removable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            codex_home = home / ".codex"
+            skill = self.make_skill(codex_home, "current")
+
+            with (
+                mock.patch.object(self.module, "_run_command") as run_command,
+                mock.patch.object(self.module, "_atomic_write_json") as write_json,
+            ):
+                report = self.module.build_status(skill, codex_home, user_home=home)
+
+            run_command.assert_not_called()
+            write_json.assert_not_called()
+
+        self.assertEqual(
+            report["legacy_plugin"],
+            {
+                "detected": False,
+                "safe_to_remove": False,
+                "marketplace": "absent",
+                "registration": "absent",
+                "source": "absent",
+            },
+        )
+
+    def test_status_reports_owned_legacy_plugin_as_safe_without_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            codex_home = home / ".codex"
+            skill = self.make_skill(codex_home, "current")
+            source = home / "plugins" / "podotion-image"
+            source.mkdir(parents=True)
+            marketplace = home / ".agents" / "plugins" / "marketplace.json"
+            marketplace.parent.mkdir(parents=True)
+            original = json.dumps(
+                {
+                    "name": "personal",
+                    "plugins": [
+                        {
+                            "name": "podotion-image",
+                            "source": self.module.LEGACY_MARKETPLACE_SOURCE,
+                        }
+                    ],
+                }
+            )
+            marketplace.write_text(original, encoding="utf-8")
+
+            report = self.module.build_status(skill, codex_home, user_home=home)
+
+            self.assertTrue(report["legacy_plugin"]["detected"])
+            self.assertTrue(report["legacy_plugin"]["safe_to_remove"])
+            self.assertEqual(report["legacy_plugin"]["registration"], "owned")
+            self.assertEqual(report["legacy_plugin"]["source"], "directory")
+            self.assertEqual(marketplace.read_text(encoding="utf-8"), original)
+            self.assertTrue(source.is_dir())
+
+    def test_status_marks_unsafe_legacy_plugin_variants_not_removable(self) -> None:
+        cases = (
+            "different-source",
+            "marketplace-invalid-name",
+            "source-non-directory",
+            "source-symlink",
+            "marketplace-symlink",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                home = Path(temp_dir)
+                codex_home = home / ".codex"
+                skill = self.make_skill(codex_home, "current")
+                source = home / "plugins" / "podotion-image"
+                marketplace = home / ".agents" / "plugins" / "marketplace.json"
+
+                if case == "different-source":
+                    marketplace.parent.mkdir(parents=True)
+                    marketplace.write_text(
+                        json.dumps(
+                            {
+                                "name": "personal",
+                                "plugins": [
+                                    {
+                                        "name": "podotion-image",
+                                        "source": {
+                                            "source": "local",
+                                            "path": "./plugins/not-owned",
+                                        },
+                                    }
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                elif case == "marketplace-invalid-name":
+                    marketplace.parent.mkdir(parents=True)
+                    marketplace.write_text(
+                        json.dumps(
+                            {
+                                "name": "",
+                                "plugins": [
+                                    {
+                                        "name": "podotion-image",
+                                        "source": self.module.LEGACY_MARKETPLACE_SOURCE,
+                                    }
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                elif case == "source-non-directory":
+                    source.parent.mkdir(parents=True)
+                    source.write_text("not a directory", encoding="utf-8")
+                else:
+                    target = home / "outside"
+                    target.mkdir()
+                    try:
+                        if case == "source-symlink":
+                            source.parent.mkdir(parents=True)
+                            source.symlink_to(target, target_is_directory=True)
+                        else:
+                            marketplace.parent.mkdir(parents=True)
+                            marketplace.symlink_to(target, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"symbolic links are unavailable: {exc}")
+
+                report = self.module.build_status(skill, codex_home, user_home=home)
+
+                self.assertTrue(report["legacy_plugin"]["detected"])
+                self.assertFalse(report["legacy_plugin"]["safe_to_remove"])
+                if case == "different-source":
+                    self.assertEqual(report["legacy_plugin"]["registration"], "different-source")
+                elif case == "marketplace-invalid-name":
+                    self.assertEqual(report["legacy_plugin"]["marketplace"], "invalid")
+                elif case == "source-non-directory":
+                    self.assertEqual(report["legacy_plugin"]["source"], "non-directory")
+                elif case == "source-symlink":
+                    self.assertEqual(report["legacy_plugin"]["source"], "symlink")
+                else:
+                    self.assertEqual(report["legacy_plugin"]["marketplace"], "symlink")
 
     def test_update_replaces_skill_and_preserves_external_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -38,12 +39,16 @@ class ConfigureDirectTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def run_cli(self, target: Path, stdin: str, *extra: str) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        self,
+        target: Path,
+        *extra: str,
+        stdin: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
                 str(CONFIGURE_PATH),
-                "--stdin",
                 "--credential-file",
                 str(target),
                 *extra,
@@ -53,6 +58,9 @@ class ConfigureDirectTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def run_cli(self, target: Path, stdin: str, *extra: str) -> subprocess.CompletedProcess[str]:
+        return self.run_command(target, "--stdin", *extra, stdin=stdin)
 
     def test_render_default_only_is_backward_compatible(self) -> None:
         secret = 'sk-value-with-"quote"-and-\\slash'
@@ -166,6 +174,17 @@ class ConfigureDirectTests(unittest.TestCase):
         self.assertNotIn("PodotionImage4kSk", saved)
         self.assertNotIn(secret, result.stdout + result.stderr)
 
+    def test_legacy_raw_stdin_secret_may_contain_equals(self) -> None:
+        secret = "sk-legacy=with=equals"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            result = self.run_cli(target, secret + "\n", "--force")
+            saved = tomllib.loads(target.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(saved["PodotionImageSk"], secret)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+
     def test_stdin_cli_accepts_two_lines_without_leaks(self) -> None:
         default_secret = "sk-default-never-print"
         four_k_secret = "sk-4k-never-print"
@@ -180,6 +199,118 @@ class ConfigureDirectTests(unittest.TestCase):
         self.assertEqual(saved["PodotionImage4kSk"], four_k_secret)
         self.assertNotIn(default_secret, result.stdout + result.stderr)
         self.assertNotIn(four_k_secret, result.stdout + result.stderr)
+
+    def test_assignment_stdin_accepts_bom_blanks_any_order_and_equals_in_values(self) -> None:
+        default_secret = "sk-default=with=equals"
+        four_k_secret = "sk-4k=with=equals"
+        source = (
+            "\ufeff\n"
+            f"PodotionImage4kSk={four_k_secret}\n"
+            "\n"
+            f"PodotionImageSk={default_secret}\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            result = self.run_cli(target, source, "--force")
+            saved = tomllib.loads(target.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(saved["PodotionImageSk"], default_secret)
+        self.assertEqual(saved["PodotionImage4kSk"], four_k_secret)
+        self.assertNotIn(default_secret, result.stdout + result.stderr)
+        self.assertNotIn(four_k_secret, result.stdout + result.stderr)
+
+    def test_input_file_is_read_only_and_accepts_assignment_format(self) -> None:
+        default_secret = "sk-file-default"
+        four_k_secret = "sk-file-4k"
+        original = (
+            b"\xef\xbb\xbf\r\n"
+            + f"PodotionImage4kSk={four_k_secret}\r\n".encode()
+            + b"\r\n"
+            + f"PodotionImageSk={default_secret}\r\n".encode()
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "credentials.txt"
+            target = Path(temp_dir) / "provider.toml"
+            source.write_bytes(original)
+            before = source.stat()
+            result = self.run_command(
+                target,
+                "--input-file",
+                str(source),
+                "--force",
+            )
+            after = source.stat()
+            saved = tomllib.loads(target.read_text(encoding="utf-8"))
+
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(stat.S_IMODE(after.st_mode), stat.S_IMODE(before.st_mode))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(saved["PodotionImageSk"], default_secret)
+        self.assertEqual(saved["PodotionImage4kSk"], four_k_secret)
+        self.assertNotIn(default_secret, result.stdout + result.stderr)
+        self.assertNotIn(four_k_secret, result.stdout + result.stderr)
+
+    def test_assignment_input_rejects_unknown_duplicate_missing_and_placeholder_keys(self) -> None:
+        secret = "sk-invalid-input-must-not-leak"
+        inputs = (
+            f"UnknownCredential={secret}\n",
+            f"PodotionImageSk={secret}\nPodotionImageSk=sk-second\n",
+            f"PodotionImage4kSk={secret}\n",
+            "PodotionImageSk=__PODOTION_IMAGE_SK__\n",
+            f"PodotionImageSk ={secret}\n",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            for assignment in inputs:
+                with self.subTest(assignment=assignment.split("=", 1)[0]):
+                    result = self.run_cli(target, assignment, "--force")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(target.exists())
+                    self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_input_file_rejects_legacy_raw_lines_and_is_mutually_exclusive_with_stdin(self) -> None:
+        secret = "sk-source-never-print"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "credentials.txt"
+            target = Path(temp_dir) / "provider.toml"
+            source.write_text(secret + "\n", encoding="utf-8")
+            original = source.read_bytes()
+            raw_result = self.run_command(target, "--input-file", str(source), "--force")
+            exclusive_result = self.run_command(
+                target,
+                "--stdin",
+                "--input-file",
+                str(source),
+                "--force",
+                stdin=secret,
+            )
+
+            self.assertNotEqual(raw_result.returncode, 0)
+            self.assertNotEqual(exclusive_result.returncode, 0)
+            self.assertFalse(target.exists())
+            self.assertEqual(source.read_bytes(), original)
+            self.assertNotIn(secret, raw_result.stdout + raw_result.stderr)
+            self.assertNotIn(secret, exclusive_result.stdout + exclusive_result.stderr)
+
+    def test_input_file_cannot_alias_destination(self) -> None:
+        secret = "sk-same-file-never-print"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            original = f"PodotionImageSk={secret}\n".encode()
+            target.write_bytes(original)
+            result = self.run_command(
+                target,
+                "--input-file",
+                str(target),
+                "--force",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_set_4k_preserves_default_and_replaces_4k(self) -> None:
         default_secret = "sk-default-preserved"
@@ -196,6 +327,43 @@ class ConfigureDirectTests(unittest.TestCase):
         self.assertEqual(saved["PodotionImage4kSk"], new_four_k)
         self.assertNotIn(default_secret, result.stdout + result.stderr)
         self.assertNotIn(new_four_k, result.stdout + result.stderr)
+
+    def test_set_4k_accepts_assignment_stdin_and_input_file(self) -> None:
+        default_secret = "sk-default-preserved"
+        values = ("sk-assignment-stdin", "sk-assignment-file")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            target.write_text(self.module.render_config(default_secret), encoding="utf-8")
+            stdin_result = self.run_cli(
+                target,
+                f"PodotionImage4kSk={values[0]}\n",
+                "--set-4k",
+                "--force",
+            )
+            source = Path(temp_dir) / "credentials.txt"
+            source.write_text(
+                f"\ufeff\nPodotionImage4kSk={values[1]}\n",
+                encoding="utf-8",
+            )
+            original = source.read_bytes()
+            file_result = self.run_command(
+                target,
+                "--input-file",
+                str(source),
+                "--set-4k",
+                "--force",
+            )
+            saved = tomllib.loads(target.read_text(encoding="utf-8"))
+
+            self.assertEqual(source.read_bytes(), original)
+
+        self.assertEqual(stdin_result.returncode, 0, stdin_result.stderr)
+        self.assertEqual(file_result.returncode, 0, file_result.stderr)
+        self.assertEqual(saved["PodotionImageSk"], default_secret)
+        self.assertEqual(saved["PodotionImage4kSk"], values[1])
+        combined = stdin_result.stdout + stdin_result.stderr + file_result.stdout + file_result.stderr
+        for secret in (default_secret, *values):
+            self.assertNotIn(secret, combined)
 
     def test_set_4k_requires_flags_and_existing_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -250,6 +418,81 @@ class ConfigureDirectTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(target.exists())
                     self.assertNotIn(stdin, result.stdout + result.stderr)
+
+    def test_check_is_local_read_only_and_reports_profiles_without_secrets(self) -> None:
+        default_secret = "sk-check-default"
+        four_k_secret = "sk-check-4k"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            target.write_text(
+                self.module.render_config(default_secret, four_k_secret), encoding="utf-8"
+            )
+            original = target.read_bytes()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    self.module.sys,
+                    "argv",
+                    [
+                        str(CONFIGURE_PATH),
+                        "--check",
+                        "--credential-file",
+                        str(target),
+                    ],
+                ),
+                mock.patch.object(
+                    self.module.runtime,
+                    "_open_provider_request",
+                    side_effect=AssertionError("network was attempted"),
+                ),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                result = self.module.main()
+            report = json.loads(stdout.getvalue())
+
+            self.assertEqual(target.read_bytes(), original)
+
+        self.assertEqual(result, 0, stderr.getvalue())
+        self.assertEqual(report["operation"], "check")
+        self.assertEqual(report["credential_profiles"], {"default": True, "4k": True})
+        self.assertNotIn(default_secret, stdout.getvalue() + stderr.getvalue())
+        self.assertNotIn(four_k_secret, stdout.getvalue() + stderr.getvalue())
+
+    def test_check_rejects_mutating_options_and_missing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            missing = self.run_command(target, "--check")
+            forced = self.run_command(target, "--check", "--force")
+            sourced = self.run_command(target, "--check", "--stdin", stdin="sk-secret")
+
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertNotEqual(forced.returncode, 0)
+            self.assertNotEqual(sourced.returncode, 0)
+            self.assertFalse(target.exists())
+            self.assertNotIn("sk-secret", sourced.stdout + sourced.stderr)
+
+    def test_check_reports_optional_4k_absent_and_redacts_invalid_config(self) -> None:
+        default_secret = "sk-check-default-only"
+        malformed_secret = "sk-malformed-must-not-leak"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "provider.toml"
+            target.write_text(self.module.render_config(default_secret), encoding="utf-8")
+            valid = self.run_command(target, "--check")
+            report = json.loads(valid.stdout)
+
+            original = f'PodotionImageSk = "{malformed_secret}"\nthis is not toml\n'.encode()
+            target.write_bytes(original)
+            invalid = self.run_command(target, "--check")
+
+            self.assertEqual(target.read_bytes(), original)
+
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertEqual(report["credential_profiles"], {"default": True, "4k": False})
+        self.assertNotIn(default_secret, valid.stdout + valid.stderr)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertNotIn(malformed_secret, invalid.stdout + invalid.stderr)
 
 
 if __name__ == "__main__":

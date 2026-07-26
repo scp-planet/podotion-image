@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -234,11 +235,12 @@ class CliIntegrationTests(unittest.TestCase):
         images = [part for part in parts if part["name"] == "image[]"]
         self.assertEqual(fields["model"], "gpt-image-2")
         self.assertEqual(fields["prompt"], "give it a blue scarf")
+        self.assertEqual(fields["n"], "1")
         self.assertEqual(len(images), 1)
         self.assertEqual(images[0]["data"], PNG_BYTES)
         self.assertEqual(report["request"]["input_image_count"], 1)
 
-    def test_text_result_after_valid_image_does_not_fail_or_create_orphan(self) -> None:
+    def test_multiple_response_items_are_completed_unusable_without_png(self) -> None:
         response = {
             "data": [
                 {"b64_json": PNG_B64},
@@ -249,22 +251,28 @@ class CliIntegrationTests(unittest.TestCase):
             output = Path(temp_dir) / "output"
             provider = self.provider(server.base_url)
             with mock.patch.object(self.module, "load_direct_provider", return_value=provider):
-                report = self.module.run_generation(
-                    self.args(output_dir=str(output)),
-                    "generate",
-                )
-            output_files = sorted(path.name for path in output.iterdir())
+                with self.assertRaises(self.module.ProviderRequestError) as raised:
+                    self.module.run_generation(
+                        self.args(output_dir=str(output), state_scope="single-response"),
+                        "generate",
+                    )
+            record_path = (
+                output
+                / ".state"
+                / "single-response"
+                / "requests"
+                / "test-request-0001.json"
+            )
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            png_files = list(output.rglob("*.png"))
+            request_count = len(server.requests)
 
-        self.assertTrue(report["ok"])
-        self.assertEqual(len(report["images"]), 1)
-        self.assertRegex(
-            Path(report["images"][0]["path"]).name,
-            r"^\d{8}_\d{6}_\d{6}\.png$",
-        )
-        self.assertEqual(report["warnings"], [])
-        self.assertEqual(len(output_files), 2)
-        self.assertIn(".state", output_files)
-        self.assertEqual(Path(report["state_path"]).name, "last.json")
+        self.assertEqual(raised.exception.error_kind, "output_decode_error")
+        self.assertIn("exactly one image", str(raised.exception))
+        self.assertEqual(record["status"], "completed_unusable")
+        self.assertEqual(record["failure"]["error_kind"], "output_decode_error")
+        self.assertEqual(request_count, 1)
+        self.assertEqual(png_files, [])
 
     def test_default_output_directory_is_under_current_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

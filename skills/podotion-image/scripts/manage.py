@@ -106,7 +106,97 @@ def legacy_plugin_source(user_home: Path) -> Path:
 
 
 def legacy_marketplace_path(user_home: Path) -> Path:
-    return (user_home / ".agents" / "plugins" / "marketplace.json").resolve()
+    return (user_home / ".agents" / "plugins" / "marketplace.json").absolute()
+
+
+def inspect_legacy_plugin(user_home: Path) -> dict[str, Any]:
+    """Return sanitized, read-only facts about the legacy Plugin installation."""
+
+    source = legacy_plugin_source(user_home)
+    marketplace = legacy_marketplace_path(user_home)
+
+    source_unsafe = False
+    try:
+        if source.is_symlink():
+            source_state = "symlink"
+            source_unsafe = True
+        elif not source.exists():
+            source_state = "absent"
+        elif source.is_dir():
+            source_state = "directory"
+        else:
+            source_state = "non-directory"
+            source_unsafe = True
+    except OSError:
+        source_state = "unreadable"
+        source_unsafe = True
+
+    marketplace_state = "absent"
+    registration_state = "absent"
+    marketplace_unsafe = False
+    if marketplace.is_symlink():
+        marketplace_state = "symlink"
+        registration_state = "unknown"
+        marketplace_unsafe = True
+    elif marketplace.exists() and not marketplace.is_file():
+        marketplace_state = "non-file"
+        registration_state = "unknown"
+        marketplace_unsafe = True
+    elif marketplace.is_file():
+        try:
+            if marketplace.stat().st_size > MAX_MARKETPLACE_BYTES:
+                raise LifecycleError("legacy Marketplace file exceeds the safety limit")
+            payload = json.loads(marketplace.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, LifecycleError):
+            marketplace_state = "unreadable"
+            registration_state = "unknown"
+            marketplace_unsafe = True
+        else:
+            marketplace_state = "present"
+            plugins = payload.get("plugins") if isinstance(payload, dict) else None
+            marketplace_name = payload.get("name") if isinstance(payload, dict) else None
+            if (
+                not isinstance(plugins, list)
+                or not isinstance(marketplace_name, str)
+                or not marketplace_name.strip()
+            ):
+                marketplace_state = "invalid"
+                registration_state = "unknown"
+                marketplace_unsafe = True
+            else:
+                same_name = [
+                    entry
+                    for entry in plugins
+                    if isinstance(entry, dict) and entry.get("name") == SKILL_NAME
+                ]
+                if any(
+                    entry.get("source") != LEGACY_MARKETPLACE_SOURCE
+                    for entry in same_name
+                ):
+                    registration_state = "different-source"
+                    marketplace_unsafe = True
+                elif same_name:
+                    registration_state = "owned"
+
+    detected = (
+        source_state != "absent"
+        or registration_state != "absent"
+        or marketplace_unsafe
+    )
+    safe_to_remove = (
+        detected
+        and not marketplace_unsafe
+        and not source_unsafe
+        and source_state in {"absent", "directory"}
+        and registration_state in {"absent", "owned"}
+    )
+    return {
+        "detected": detected,
+        "safe_to_remove": safe_to_remove,
+        "marketplace": marketplace_state,
+        "registration": registration_state,
+        "source": source_state,
+    }
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -358,7 +448,12 @@ def _safe_metadata(root: Path) -> dict[str, Any] | None:
     }
 
 
-def build_status(root: Path, codex_home: Path) -> dict[str, Any]:
+def build_status(
+    root: Path,
+    codex_home: Path,
+    *,
+    user_home: Path | None = None,
+) -> dict[str, Any]:
     expected = expected_skill_root(codex_home)
     root_exists = root.is_dir() and not root.is_symlink()
     managed = root_exists and _same_path(root, expected) and _has_required_files(root)
@@ -378,6 +473,7 @@ def build_status(root: Path, codex_home: Path) -> dict[str, Any]:
             "preserved_by_update": True,
             "preserved_by_uninstall": True,
         },
+        "legacy_plugin": inspect_legacy_plugin((user_home or Path.home()).resolve()),
     }
 
 

@@ -251,10 +251,10 @@ class ProviderRequestError(RuntimeError):
 
 
 class ImageCandidateError(RuntimeError):
-    """All explicitly declared image candidates failed safe decoding."""
+    """The single declared image result failed safe decoding."""
 
     def __init__(self, candidate_count: int, warnings: Sequence[Mapping[str, Any]]) -> None:
-        super().__init__(f"all {candidate_count} image candidates were invalid")
+        super().__init__("the image result was invalid")
         self.candidate_count = candidate_count
         self.warnings = [dict(warning) for warning in warnings]
 
@@ -595,6 +595,7 @@ def build_images_edit_multipart(
         ("size", size),
         ("quality", QUALITY),
         ("output_format", "png"),
+        ("n", "1"),
     ):
         add_field(name, value)
 
@@ -902,50 +903,36 @@ def _classify_result_value(
 
 
 def extract_image_results(payload: Mapping[str, Any]) -> list[ImageResult]:
-    """Extract only explicit Images API b64_json/url fields from known envelopes."""
+    """Extract exactly one image from the standard ImagesResponse data array."""
 
-    results: list[ImageResult] = []
-    seen: set[tuple[str, str]] = set()
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise RuntimeError("provider ImagesResponse data must be an array")
+    if len(data) != 1:
+        raise RuntimeError(
+            f"provider ImagesResponse data must contain exactly one image; got {len(data)}"
+        )
+    item = data[0]
+    if not isinstance(item, Mapping):
+        raise RuntimeError("provider ImagesResponse data[0] must be an object")
 
-    def add_item(item: Mapping[str, Any], source: str) -> None:
-        mime_type = str(item.get("mime_type") or "").strip() or None
-        output_format = str(item.get("output_format") or "").strip() or None
-        for field_name in ("b64_json", "url"):
-            value = item.get(field_name)
-            if not isinstance(value, str) or not value.strip():
-                continue
-            normalized = value.strip()
-            identity = (field_name, normalized)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            results.append(
+    mime_type = str(item.get("mime_type") or "").strip() or None
+    output_format = str(item.get("output_format") or "").strip() or None
+    for field_name in ("b64_json", "url"):
+        value = item.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return [
                 _classify_result_value(
-                    normalized,
+                    value,
                     field_name,
-                    f"{source}.{field_name}",
+                    f"$.data[0].{field_name}",
                     mime_type,
                     output_format,
                 )
-            )
-
-    def walk_envelope(envelope: Mapping[str, Any], source: str) -> None:
-        for container_name in ("data", "images"):
-            container = envelope.get(container_name)
-            if isinstance(container, Mapping):
-                add_item(container, f"{source}.{container_name}")
-            elif isinstance(container, list):
-                for index, item in enumerate(container):
-                    if isinstance(item, Mapping):
-                        add_item(item, f"{source}.{container_name}[{index}]")
-        response = envelope.get("response")
-        if isinstance(response, Mapping):
-            walk_envelope(response, f"{source}.response")
-
-    walk_envelope(payload, "$")
-    if not results:
-        raise RuntimeError("provider response did not include an Images API b64_json or url result")
-    return results
+            ]
+    raise RuntimeError(
+        "provider ImagesResponse data[0] did not include a b64_json or url result"
+    )
 
 
 def validate_download_url(value: str) -> str:
@@ -1045,89 +1032,70 @@ def _png_dimensions(data: bytes) -> tuple[int | None, int | None]:
 def save_image_results(
     results: Sequence[ImageResult], output_dir: Path, timeout: float = TIMEOUT_SECONDS
 ) -> tuple[list[SavedImage], list[dict[str, Any]]]:
-    if not results:
-        raise RuntimeError("no image results to save")
+    if len(results) != 1:
+        raise RuntimeError(f"exactly one image result is required; got {len(results)}")
 
-    candidate_count = len(results)
-    decoded: list[tuple[bytes, str, str]] = []
-    warnings: list[dict[str, Any]] = []
-    for index, result in enumerate(results, start=1):
-        try:
-            decoded.append(_decode_image_result(result, timeout))
-        except Exception as exc:
-            reason = (
-                "image result URL could not be downloaded"
-                if isinstance(exc, urllib.error.URLError)
-                else str(exc)
-            )
-            warnings.append(
+    result = results[0]
+    try:
+        data, mime_type, suffix = _decode_image_result(result, timeout)
+    except Exception as exc:
+        reason = (
+            "image result URL could not be downloaded"
+            if isinstance(exc, urllib.error.URLError)
+            else str(exc)
+        )
+        raise ImageCandidateError(
+            1,
+            [
                 {
                     "code": "invalid_image_candidate",
-                    "message": (
-                        "ignored an explicitly declared image candidate that failed validation"
-                    ),
-                    "result_index": index,
-                    "candidate_count": candidate_count,
+                    "message": "the declared image result failed validation",
+                    "result_index": 1,
+                    "candidate_count": 1,
                     "source": result.source,
                     "value_length": len(result.value),
                     "reason": reason,
                 }
-            )
-    if not decoded:
-        raise ImageCandidateError(candidate_count, warnings)
+            ],
+        ) from exc
 
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    multiple = len(decoded) > 1
-    saved: list[SavedImage] = []
-    staged: list[tuple[Path, Path, SavedImage]] = []
-    temporary_paths: list[Path] = []
-    committed: list[Path] = []
+    filename = f"{stamp}{suffix}"
+    destination = output_dir / filename
+    if destination.exists():
+        raise RuntimeError("generated image destination already exists")
+    temporary = output_dir / f".{filename}.{secrets.token_hex(6)}.tmp"
+    committed = False
     try:
-        for index, (data, mime_type, suffix) in enumerate(decoded, start=1):
-            filename = f"{stamp}_{index:02d}{suffix}" if multiple else f"{stamp}{suffix}"
-            destination = output_dir / filename
-            if destination.exists():
-                raise RuntimeError("generated image destination already exists")
-            temporary = output_dir / f".{filename}.{secrets.token_hex(6)}.tmp"
-            temporary_paths.append(temporary)
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            width, height = _png_dimensions(data)
-            staged.append(
-                (
-                    temporary,
-                    destination,
-                    SavedImage(
-                        path=destination,
-                        mime_type=mime_type,
-                        bytes=len(data),
-                        width=width,
-                        height=height,
-                    ),
-                )
-            )
-        for temporary, destination, image in staged:
-            os.replace(temporary, destination)
-            committed.append(destination)
-            saved.append(image)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        width, height = _png_dimensions(data)
+        image = SavedImage(
+            path=destination,
+            mime_type=mime_type,
+            bytes=len(data),
+            width=width,
+            height=height,
+        )
+        os.replace(temporary, destination)
+        committed = True
     except Exception as exc:
-        for temporary in temporary_paths:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-        for destination in committed:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        if committed:
             try:
                 destination.unlink()
             except FileNotFoundError:
                 pass
-        raise RuntimeError("failed to atomically save the decoded image batch") from exc
-    return saved, warnings
+        raise RuntimeError("failed to atomically save the decoded image") from exc
+    return [image], []
 
 
 def image_size_warnings(
@@ -2077,7 +2045,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
                 except FileNotFoundError:
                     pass
             error = ProviderRequestError(
-                "failed to write image state; saved image batch was rolled back",
+                "failed to write image state; the saved image was rolled back",
                 error_kind="output_save_error",
                 elapsed_ms=round((time.monotonic() - started) * 1000),
                 attempts=1,
@@ -2123,7 +2091,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
             except FileNotFoundError:
                 pass
             raise ProviderRequestError(
-                "failed to commit request state; saved image batch was rolled back",
+                "failed to commit request state; the saved image was rolled back",
                 error_kind="output_save_error",
                 elapsed_ms=round((time.monotonic() - started) * 1000),
                 attempts=1,

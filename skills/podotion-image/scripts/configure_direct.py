@@ -205,9 +205,7 @@ def write_private_config(destination: Path, content: str, *, force: bool = False
     return target
 
 
-def _read_stdin_lines(max_bytes: int) -> list[str]:
-    stream = getattr(sys.stdin, "buffer", sys.stdin)
-    data = stream.read(max_bytes + 1)
+def _decode_input(data: bytes | str, max_bytes: int) -> str:
     if isinstance(data, str):
         try:
             encoded = data.encode("utf-8")
@@ -218,14 +216,72 @@ def _read_stdin_lines(max_bytes: int) -> list[str]:
     if len(encoded) > max_bytes:
         raise ValueError("credential input exceeds the safety limit")
     try:
-        text = encoded.decode("utf-8")
+        return encoded.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ValueError("credential input must be UTF-8") from exc
-    return text.splitlines()
 
 
-def _read_credentials_from_stdin() -> tuple[str, str | None]:
-    lines = _read_stdin_lines(MAX_STDIN_BYTES)
+def _read_stdin(max_bytes: int) -> str:
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    data = stream.read(max_bytes + 1)
+    return _decode_input(data, max_bytes).removeprefix("\ufeff")
+
+
+def _read_input_file(path: Path, max_bytes: int = MAX_STDIN_BYTES) -> str:
+    source = path.expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError("credential input file was not found")
+    try:
+        with source.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise RuntimeError("credential input file could not be read") from exc
+    return _decode_input(data, max_bytes)
+
+
+def _parse_assignments(text: str, *, set_four_k: bool = False) -> tuple[str | None, str | None]:
+    assignments: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if "=" not in line:
+            raise ValueError("credential assignments must use the exact Key=value format")
+        key, value = line.split("=", 1)
+        if key not in {DEFAULT_SECRET_KEY, FOUR_K_SECRET_KEY}:
+            raise ValueError("credential input contains an unknown key")
+        if key in assignments:
+            raise ValueError("credential input contains a duplicate key")
+        assignments[key] = validate_secret(value, key=key)
+
+    if set_four_k:
+        if set(assignments) != {FOUR_K_SECRET_KEY}:
+            raise ValueError(f"--set-4k input must contain exactly {FOUR_K_SECRET_KEY}")
+        return None, assignments[FOUR_K_SECRET_KEY]
+    if DEFAULT_SECRET_KEY not in assignments:
+        raise ValueError(f"credential input must contain {DEFAULT_SECRET_KEY}")
+    return assignments[DEFAULT_SECRET_KEY], assignments.get(FOUR_K_SECRET_KEY)
+
+
+def _looks_like_assignments(text: str) -> bool:
+    lines = [line for line in text.splitlines() if line.strip()]
+    for line in lines:
+        if "=" not in line:
+            continue
+        key = line.split("=", 1)[0]
+        if key in {DEFAULT_SECRET_KEY, FOUR_K_SECRET_KEY} or key.isidentifier():
+            return True
+    return False
+
+
+def _parse_stdin_credentials(text: str, *, set_four_k: bool = False) -> tuple[str | None, str | None]:
+    if _looks_like_assignments(text):
+        return _parse_assignments(text, set_four_k=set_four_k)
+
+    lines = text.splitlines()
+    if set_four_k:
+        if len(lines) != 1:
+            raise ValueError("stdin must contain exactly one 4K credential")
+        return None, validate_secret(lines[0], key=FOUR_K_SECRET_KEY)
     if not lines or len(lines) > 2:
         raise ValueError("stdin must contain a default credential and an optional 4K credential")
     default_secret = validate_secret(lines[0], key=DEFAULT_SECRET_KEY)
@@ -237,11 +293,38 @@ def _read_credentials_from_stdin() -> tuple[str, str | None]:
     return default_secret, four_k_secret
 
 
+def _read_credentials_from_stdin() -> tuple[str, str | None]:
+    default_secret, four_k_secret = _parse_stdin_credentials(_read_stdin(MAX_STDIN_BYTES))
+    if default_secret is None:
+        raise RuntimeError("default credential parsing failed")
+    return default_secret, four_k_secret
+
+
 def _read_four_k_from_stdin() -> str:
-    lines = _read_stdin_lines(MAX_SECRET_BYTES + 2)
-    if len(lines) != 1:
-        raise ValueError("stdin must contain exactly one 4K credential")
-    return validate_secret(lines[0], key=FOUR_K_SECRET_KEY)
+    _, four_k_secret = _parse_stdin_credentials(
+        _read_stdin(MAX_STDIN_BYTES),
+        set_four_k=True,
+    )
+    if four_k_secret is None:
+        raise RuntimeError("4K credential parsing failed")
+    return four_k_secret
+
+
+def _read_credentials_from_file(path: Path, *, set_four_k: bool = False) -> tuple[str | None, str | None]:
+    return _parse_assignments(_read_input_file(path), set_four_k=set_four_k)
+
+
+def _paths_refer_to_same_file(first: Path, second: Path) -> bool:
+    first_resolved = first.expanduser().resolve()
+    second_resolved = second.expanduser().resolve()
+    if first_resolved == second_resolved:
+        return True
+    if not first_resolved.exists() or not second_resolved.exists():
+        return False
+    try:
+        return first_resolved.samefile(second_resolved)
+    except OSError:
+        return False
 
 
 def _safe_error_message(exc: Exception, secret_values: Iterable[str]) -> str:
@@ -255,8 +338,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Write Podotion image credentials to the private runtime config."
     )
-    parser.add_argument("--stdin", action="store_true", help="read credentials from stdin")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--stdin", action="store_true", help="read credentials from stdin")
+    source.add_argument(
+        "--input-file",
+        help="read exact PodotionImageSk=... assignments from a local UTF-8 file",
+    )
     parser.add_argument("--force", action="store_true", help="replace an existing credential file")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate the existing credential file locally without changing it",
+    )
     parser.add_argument(
         "--set-4k",
         action="store_true",
@@ -278,10 +371,44 @@ def main() -> int:
             if args.credential_file
             else runtime.direct_provider_config_path()
         )
+        if args.check:
+            if args.stdin or args.input_file or args.force or args.set_4k:
+                raise ValueError("--check cannot be combined with an input source, --force, or --set-4k")
+            _, four_k_secret = read_existing_config(destination)
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "operation": "check",
+                        "config_path": str(destination.expanduser().resolve()),
+                        "credential_profiles": {
+                            "default": True,
+                            "4k": four_k_secret is not None,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+
+        input_path = Path(args.input_file) if args.input_file else None
+        if input_path is not None and _paths_refer_to_same_file(input_path, destination):
+            raise ValueError("credential input file must be different from the destination")
+
         if args.set_4k:
-            if not args.stdin or not args.force:
-                raise ValueError("--set-4k requires --stdin and --force")
-            four_k_secret = _read_four_k_from_stdin()
+            if not (args.stdin or input_path is not None) or not args.force:
+                raise ValueError("--set-4k requires an input source and --force")
+            if args.stdin:
+                four_k_secret = _read_four_k_from_stdin()
+            else:
+                if input_path is None:
+                    raise RuntimeError("credential input source is unavailable")
+                _, four_k_secret = _read_credentials_from_file(
+                    input_path, set_four_k=True
+                )
+                if four_k_secret is None:
+                    raise RuntimeError("4K credential parsing failed")
             secret_values.append(four_k_secret)
             default_secret, _ = read_existing_config(destination)
             secret_values.append(default_secret)
@@ -289,6 +416,10 @@ def main() -> int:
         else:
             if args.stdin:
                 default_secret, four_k_secret = _read_credentials_from_stdin()
+            elif input_path is not None:
+                default_secret, four_k_secret = _read_credentials_from_file(input_path)
+                if default_secret is None:
+                    raise RuntimeError("default credential parsing failed")
             else:
                 default_secret = validate_secret(
                     getpass.getpass(f"{DEFAULT_SECRET_KEY}: "), key=DEFAULT_SECRET_KEY

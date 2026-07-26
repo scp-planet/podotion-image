@@ -19,27 +19,55 @@ class InstallInstructionTests(unittest.TestCase):
         self.prompt = self.readme[prompt_start + len("```text") : prompt_end]
 
     def test_first_install_uses_standard_skill_subdirectory_url(self) -> None:
-        self.assertIn("内置 skill-installer", self.prompt)
+        lines = [line for line in self.prompt.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], "$skill-installer")
+        self.assertEqual(lines[1], SKILL_URL)
         self.assertIn(SKILL_URL, self.prompt)
         self.assertIn("裸仓库 URL", self.readme)
         self.assertNotIn("scripts/install.py", self.prompt)
         self.assertNotIn("codex plugin add", self.prompt)
 
-    def test_install_prompt_keeps_both_secrets_on_stdin(self) -> None:
-        self.assertEqual(self.readme.count("{{PodotionImageSk}}"), 1)
-        self.assertEqual(self.readme.count("{{PodotionImage4kSk}}"), 1)
-        self.assertIn("configure_direct.py --stdin --force", self.prompt)
-        self.assertIn("第一行是默认 SK，第二行是 4K SK", self.prompt)
-        self.assertIn("不得把 SK 放入命令行参数", self.prompt)
-        self.assertIn("不得运行 --image-probe", self.prompt)
+    def test_install_prompt_contains_no_credentials_or_post_install_actions(self) -> None:
+        self.assertNotIn("{{PodotionImageSk}}", self.readme)
+        self.assertNotIn("{{PodotionImage4kSk}}", self.readme)
+        for marker in (
+            "PodotionImageSk",
+            "PodotionImage4kSk",
+            "configure_direct.py",
+            "doctor",
+            "uninstall-legacy-plugin",
+        ):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, self.prompt)
+        self.assertIn("安装阶段不提交或配置任何 SK", self.readme)
 
     def test_native_python_and_runtime_requirement_are_clear(self) -> None:
         for platform in ("Windows", "macOS", "Linux", "WSL"):
             with self.subTest(platform=platform):
-                self.assertIn(platform, self.prompt)
+                self.assertIn(platform, self.readme)
         self.assertIn("Python 3.11", self.readme)
         self.assertIn("不代表系统一定提供", self.readme)
-        self.assertIn("重启 Codex、新建任务", self.prompt)
+        self.assertIn("安装完成后重启 Codex 并新建任务", self.readme)
+
+    def test_lazy_configuration_preflight_and_inputs_are_documented(self) -> None:
+        self.assertIn("每个新任务的第一次生成或编辑之前", self.readme)
+        self.assertIn("configure_direct.py --check", self.readme)
+        self.assertIn("manage.py status", self.readme)
+        self.assertIn("本地、只读", self.readme)
+        self.assertIn("PodotionImageSk=<value>", self.readme)
+        self.assertIn("PodotionImage4kSk=<value>", self.readme)
+        self.assertIn("UTF-8 文本文件", self.readme)
+        self.assertIn("非 4K 请求不要求 4K SK", self.readme)
+
+    def test_attachment_security_boundary_and_restart_are_explicit(self) -> None:
+        self.assertIn("避免把 SK 字面量放进聊天提示正文或进程命令行参数", self.readme)
+        self.assertIn("仍是当前 Codex 会话的输入", self.readme)
+        self.assertIn("并不是会话外的秘密通道", self.readme)
+        self.assertIn("--input-file", self.readme)
+        self.assertIn("任何成功的配置写入后", self.readme)
+        self.assertIn("运行不带 `--image-probe` 的非计费 `doctor`", self.readme)
+        self.assertIn("完成配置和可选迁移后停止当前任务", self.readme)
 
     def test_update_and_uninstall_contracts_are_documented(self) -> None:
         self.assertIn("manage.py update --dry-run", self.readme)
@@ -68,12 +96,24 @@ class InstallInstructionTests(unittest.TestCase):
         self.assertIn("不会执行安装钩子", self.readme)
         self.assertIn("不再提供 MCP `image`", self.readme)
         self.assertIn("从旧 Plugin 迁移", self.readme)
-        self.assertIn("uninstall-legacy-plugin --yes", self.prompt)
-        self.assertIn("不要要求我手工编辑 Marketplace 或删除目录", self.prompt)
+        self.assertIn("每个新任务的首次图片预检", self.readme)
+        self.assertIn("拒绝只对当前任务有效", self.readme)
+        doctor = self.readme.index("必须先在本任务运行不计费的 `podotion_image.py doctor`")
+        cleanup = self.readme.index("只有 doctor 成功才运行清理", doctor)
+        self.assertLess(doctor, cleanup)
         self.assertIn("不需要手工运行 `codex plugin remove`", self.readme)
+        self.assertIn("迁移成功后立即停止当前任务", self.readme)
 
     def test_default_output_directory_is_documented(self) -> None:
         self.assertIn("<workspace>/PodotionImageOutput", self.readme)
+
+    def test_single_request_and_serial_multi_image_behavior_is_documented(self) -> None:
+        self.assertIn("每次上游请求固定 `n=1`", self.readme)
+        self.assertIn("只接受一张标准 `data[]` 结果", self.readme)
+        self.assertIn("最多串行执行 10 个独立图片操作", self.readme)
+        self.assertIn("绝不并行", self.readme)
+        self.assertIn("相同提示词的第二张及以后使用 `--force-new`", self.readme)
+        self.assertIn("后续图片不再执行", self.readme)
 
 
 if __name__ == "__main__":

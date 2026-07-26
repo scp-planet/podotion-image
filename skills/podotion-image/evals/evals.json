@@ -3,10 +3,11 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "生成一张戴黄色雨帽的小猫图片，正方形。",
-      "expected_output": "使用 standalone podotion_image.py generate，通过 stdin 发送精简提示词，传入稳定 state_scope、新 request_key 和 workspace 下的绝对输出目录；使用默认 SK，最多发送一次上游 POST，并在回复中嵌入本地 PNG 及绝对文件链接。",
+      "prompt": "这是一个新任务，凭据已经配置。生成一张戴黄色雨帽的小猫图片，正方形。",
+      "expected_output": "先运行一次本地 configure_direct.py --check 和 manage.py status 预检；确认当前请求所需凭据可用后使用 standalone podotion_image.py generate，通过 stdin 发送精简提示词，传入稳定 state_scope、新 request_key 和 workspace 下的绝对输出目录；使用默认 profile，最多发送一次上游 POST，并在回复中嵌入本地 PNG 及绝对文件链接。",
       "files": [],
       "expectations": [
+        "Runs both local read-only preflight checks once before the task's first image action",
         "Uses the bundled standalone script rather than an MCP or another image provider",
         "Uses the default credential profile",
         "Supplies stable request identity and sends at most one upstream POST",
@@ -26,7 +27,7 @@
     },
     {
       "id": 3,
-      "prompt": "生成一张 4K、4:3 的建筑效果图。",
+      "prompt": "这是一个新任务，默认和 4K 凭据都已配置。生成一张 4K、4:3 的建筑效果图。",
       "expected_output": "解析 4K 档和 4:3 比例，由执行器使用 PodotionImage4kSk；即使该比例解析出的像素总量略低于 UHD 阈值，也因显式 4K 档走 4K profile。",
       "files": [],
       "expectations": [
@@ -38,12 +39,13 @@
     {
       "id": 4,
       "prompt": "只配置了旧的 PodotionImageSk。请生成 3840x2160 图片。",
-      "expected_output": "在创建输出目录、请求状态或网络请求前停止，脱敏说明缺少 PodotionImage4kSk，且绝不回退默认 SK。",
+      "expected_output": "在创建输出目录、请求状态或网络请求前停止，脱敏说明需要按需配置 PodotionImage4kSk；提供 inline KEY=value 和 UTF-8 附件两种输入方式，且绝不回退默认 SK。收到并写入 4K SK 后运行不带 --image-probe 的非计费 doctor；完成配置和已授权迁移后停止，提示重启 Codex、新建任务并重新提出图片请求。",
       "files": [],
       "expectations": [
         "Fails before all filesystem request-state and network side effects",
-        "Names the missing 4K field without revealing the default key",
-        "Never falls back to the default credential"
+        "Requests only PodotionImage4kSk using inline KEY=value or a UTF-8 attachment",
+        "Never falls back to the default credential",
+        "Runs non-billable doctor after the write, then stops before image generation"
       ]
     },
     {
@@ -124,13 +126,14 @@
     },
     {
       "id": 12,
-      "prompt": "新版已经通过 doctor，请帮我卸载以前通过 podotion-image@personal 安装的旧 Plugin。",
-      "expected_output": "运行 manage.py uninstall-legacy-plugin --yes；只清理旧 podotion-image@personal 的精确 Marketplace/source，保留凭据、新 Skill、图片和请求状态，完成后提示重启并新建任务，不要求用户手工编辑文件。",
+      "prompt": "这是一个新任务，manage.py status 检测到以前通过 podotion-image@personal 安装的旧 Plugin。我同意迁移，请清理它。",
+      "expected_output": "先在当前任务运行不带 --image-probe 的非计费 doctor；只有 doctor 成功才运行 manage.py uninstall-legacy-plugin --yes。只清理旧 podotion-image@personal 的精确 Marketplace/source，保留凭据、新 Skill、图片和请求状态；完成后立即停止并提示重启、新建任务。",
       "files": [],
       "expectations": [
-        "Uses the bundled legacy Plugin uninstall command",
+        "Runs a current non-billable doctor before the bundled legacy Plugin uninstall command",
         "Preserves credentials, the standalone Skill, images, and request state",
-        "Does not ask the user to edit Marketplace files or delete directories manually"
+        "Does not ask the user to edit Marketplace files or delete directories manually",
+        "Stops after migration and requests a restart"
       ]
     },
     {
@@ -141,6 +144,110 @@
       "expectations": [
         "Answers in text only",
         "Does not invoke the Skill"
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "刚安装好 Skill，这是新任务。请生成一张 1K 的团队头像；本地配置检查显示还没有配置凭据。",
+      "expected_output": "不运行 doctor 或图片命令，先索取默认凭据。说明用户可以发送 PodotionImageSk=<value>，也可以附加包含该 KEY=value 行的 UTF-8 文本文件；不提前索取 4K SK。",
+      "files": [],
+      "expectations": [
+        "Requests only the default credential before the first non-4K image",
+        "Offers inline KEY=value and UTF-8 attachment input",
+        "Does not run doctor or create an image request"
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "我附加的 UTF-8 文本文件包含一行 PodotionImageSk=<secret-value>。请配置后马上生成一张 1K 图。",
+      "expected_output": "附件有本地路径时只把路径传给 configure_direct.py --input-file 并由配置器解析唯一受支持的 KEY=value；没有路径时才通过 stdin 传递内容，不在回复或 argv 中复述值。写入成功后运行不带 --image-probe 的非计费 doctor；完成配置和已授权迁移后不生图，提示重启 Codex、新建任务并重新请求。说明附件避免 prompt/argv 暴露，但仍属于当前 Codex 会话输入。",
+      "files": [],
+      "expectations": [
+        "Uses the attachment path when available and otherwise uses configuration stdin",
+        "Does not repeat the credential in output or argv",
+        "Accurately describes the attachment as Codex session input",
+        "Runs non-billable doctor after writing, then requires restart plus a new task"
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "这是新任务。status 又检测到旧 Plugin，但我这次不迁移；默认凭据已配置，继续生成 1K 图片。",
+      "expected_output": "记录本任务拒绝后继续使用 standalone Skill，不清理旧 Plugin；明确该拒绝不跨任务保存，下一个新任务首次图片预检仍会再次询问。",
+      "files": [],
+      "expectations": [
+        "Does not migrate after the user declines",
+        "Continues through the standalone Skill when otherwise ready",
+        "Prompts again in the next new task until migration succeeds"
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "当前任务 doctor 失败了，但 status 检测到旧 Plugin；先帮我把旧 Plugin 清掉。",
+      "expected_output": "拒绝运行 uninstall-legacy-plugin，保留旧 Plugin 并报告脱敏 doctor 失败；只有当前任务的非计费 doctor 成功后才能清理。",
+      "files": [],
+      "expectations": [
+        "Does not clean up the legacy Plugin after doctor failure",
+        "Preserves the legacy installation",
+        "Does not use --image-probe"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "给我一段安装 podotion-image Skill 的提示词，我稍后再配置凭据。",
+      "expected_output": "只给出两行安装提示词：第一行调用 $skill-installer，第二行是包含 skills/podotion-image 子路径的 GitHub URL。提示词不包含 SK、配置、doctor 或旧 Plugin 清理操作；安装后提示重启并在新任务中按需配置。",
+      "files": [],
+      "expectations": [
+        "Uses $skill-installer and the exact Skill subdirectory URL",
+        "Keeps the install prompt to two non-empty lines",
+        "Does not request or embed either credential",
+        "Defers configuration and migration to a restarted new task"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "用同一个提示词生成 3 张彼此独立的 2K 猫咪电影海报。",
+      "expected_output": "先一次性完成预检、尺寸、凭据和输出目录解析；随后使用同一 state_scope、三个独立 request_key 严格串行调用三次 generate。每次请求固定 n=1；第二、第三次使用 --force-new。上一张完成保存和状态落盘后才开始下一张，最终展示三张结果。",
+      "files": [],
+      "expectations": [
+        "Uses three sequential single-image actions rather than one multi-image request",
+        "Uses one stable state_scope and three distinct request keys",
+        "Uses --force-new for the second and third identical-prompt variations",
+        "Never launches the billable actions in parallel"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "一次生成 12 张不同构图的产品海报。",
+      "expected_output": "不发起图片请求，说明单任务最多串行生成 10 张，并请用户拆成多个任务。",
+      "files": [],
+      "expectations": [
+        "Enforces the maximum of ten images per task",
+        "Asks the user to split the request",
+        "Does not make a billable request"
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "串行生成 4 张图片；第一张成功，第二张连接中断。",
+      "expected_output": "保留并展示第一张；使用第二张原有 request_key、state_scope 和 output_dir 检查状态，不启动第三、第四张，不创建新 key 重试，并报告第二张的脱敏状态。",
+      "files": [],
+      "expectations": [
+        "Preserves the first successful image",
+        "Recovers the second action with its existing request identity",
+        "Does not start the third or fourth action",
+        "Does not blindly retry the uncertain request"
+      ]
+    },
+    {
+      "id": 22,
+      "prompt": "这次 n=1 的生图响应顶层 data 返回了两个元素，请继续处理。",
+      "expected_output": "将当前请求标记为 completed_unusable，在保存 PNG 前停止；不扫描 images 或嵌套 response，不选择其中一张，不重试，也不开始任何后续图片操作。",
+      "files": [],
+      "expectations": [
+        "Rejects a non-single standard data array as a protocol error",
+        "Does not save either response item",
+        "Does not inspect nonstandard response wrappers",
+        "Does not retry the possibly billed request"
       ]
     }
   ]
