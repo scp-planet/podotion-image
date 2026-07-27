@@ -109,7 +109,12 @@ class InstallInstructionTests(unittest.TestCase):
 
     def test_single_request_and_serial_multi_image_behavior_is_documented(self) -> None:
         self.assertIn("每次上游请求固定 `n=1`", self.readme)
-        self.assertIn("只接受一张标准 `data[]` 结果", self.readme)
+        self.assertIn("标准 `data[]`", self.readme)
+        self.assertIn("`output[]`、`response.output[]`", self.readme)
+        self.assertIn("只接受一张最终结果", self.readme)
+        self.assertIn("不同容器不会合并", self.readme)
+        self.assertIn("不会递归扫描任意包装", self.readme)
+        self.assertIn("不会记录响应正文、Base64 图片、提示词或凭据", self.readme)
         self.assertIn("只使用最基础的同步 Images API", self.readme)
         self.assertIn("不调用 `/async`", self.readme)
         self.assertIn("不发送 `stream=true`", self.readme)

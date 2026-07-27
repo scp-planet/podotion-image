@@ -110,7 +110,7 @@ podotion_image.py edit --prompt-file - (--last | --image <path> ...) --size <tie
 
 Each image action uses one upstream POST with a fixed 600-second timeout and no automatic HTTP retry. Allow the command to remain quiet for several minutes.
 
-Every executor invocation requests exactly one image with `n=1` and accepts exactly one top-level Images API `data[]` item. Never ask one invocation to return multiple images. If the response has zero or multiple `data[]` items, treat it as a completed-but-unusable protocol error; do not inspect nonstandard `images` or nested `response` wrappers and do not retry.
+Every executor invocation requests exactly one image with `n=1` and accepts exactly one final image from one known synchronous response container. Prefer the standard Images API `data[]`; when it is absent, null, or empty, accept the exact Responses-compatible `output[]` or `response.output[]` shape containing `type=image_generation_call` with absent status or `status=completed`. Never merge containers, recursively scan arbitrary wrappers, or consume partial-image fields. Never ask one invocation to return multiple images. If the selected container has zero or multiple final images, treat it as a completed-but-unusable protocol error and do not retry.
 
 When the user requests multiple images:
 

@@ -111,6 +111,36 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertTrue(state_exists)
         self.assertEqual(saved_bytes, PNG_BYTES)
 
+    def test_generate_accepts_known_responses_api_wrappers(self) -> None:
+        responses = {
+            "output": {
+                "output": [
+                    {"type": "image_generation_call", "result": PNG_B64}
+                ]
+            },
+            "response.output": {
+                "response": {
+                    "output": [
+                        {"type": "image_generation_call", "result": PNG_B64}
+                    ]
+                }
+            },
+        }
+        for name, response in responses.items():
+            with self.subTest(shape=name), tempfile.TemporaryDirectory() as temp_dir:
+                with FakeProviderServer([response]) as server:
+                    provider = self.provider(server.base_url)
+                    with mock.patch.object(
+                        self.module, "load_direct_provider", return_value=provider
+                    ):
+                        report = self.module.run_generation(
+                            self.args(output_dir=temp_dir, state_scope=name), "generate"
+                        )
+                    request_count = len(server.requests)
+                saved = Path(report["images"][0]["path"])
+                self.assertEqual(saved.read_bytes(), PNG_BYTES)
+                self.assertEqual(request_count, 1)
+
     def test_4k_tier_uses_4k_credential_and_preserves_resolution_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
             [images_response()]
@@ -293,6 +323,42 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(record["failure"]["error_kind"], "output_decode_error")
         self.assertEqual(request_count, 1)
         self.assertEqual(png_files, [])
+
+    def test_multiple_responses_output_images_have_safe_diagnostics(self) -> None:
+        response = {
+            "output": [
+                {"type": "image_generation_call", "result": PNG_B64},
+                {"type": "image_generation_call", "result": PNG_B64},
+            ],
+            "provider_note": "private-response-value",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, FakeProviderServer(
+            [response]
+        ) as server:
+            output = Path(temp_dir) / "output"
+            provider = self.provider(server.base_url, token="sk-private-test-token")
+            with mock.patch.object(
+                self.module, "load_direct_provider", return_value=provider
+            ):
+                with self.assertRaises(self.module.ProviderRequestError) as raised:
+                    self.module.run_generation(
+                        self.args(
+                            prompt="private prompt",
+                            output_dir=str(output),
+                            state_scope="wrapper-error",
+                        ),
+                        "generate",
+                    )
+            request_count = len(server.requests)
+
+        report = json.dumps(raised.exception.as_json())
+        self.assertEqual(raised.exception.details["selected_shape"], "$.output")
+        self.assertEqual(raised.exception.details["candidate_count"], 2)
+        self.assertNotIn(PNG_B64, report)
+        self.assertNotIn("private-response-value", report)
+        self.assertNotIn("private prompt", report)
+        self.assertNotIn("sk-private-test-token", report)
+        self.assertEqual(request_count, 1)
 
     def test_default_output_directory_is_under_current_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

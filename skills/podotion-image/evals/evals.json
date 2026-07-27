@@ -242,13 +242,35 @@
     {
       "id": 22,
       "prompt": "这次 n=1 的生图响应顶层 data 返回了两个元素，请继续处理。",
-      "expected_output": "将当前请求标记为 completed_unusable，在保存 PNG 前停止；不扫描 images 或嵌套 response，不选择其中一张，不重试，也不开始任何后续图片操作。",
+      "expected_output": "将当前请求标记为 completed_unusable，在保存 PNG 前停止；不回退或合并 output、response.output，不选择其中一张，不重试，也不开始任何后续图片操作。",
       "files": [],
       "expectations": [
         "Rejects a non-single standard data array as a protocol error",
         "Does not save either response item",
-        "Does not inspect nonstandard response wrappers",
+        "Does not fall through to or merge another response container",
         "Does not retry the possibly billed request"
+      ]
+    },
+    {
+      "id": 23,
+      "prompt": "同步生图请求返回顶层 output，其中唯一的 image_generation_call.result 是最终图片。请交付结果。",
+      "expected_output": "把精确的 output[] 识别为受支持的 Responses 兼容结构，只选择唯一 image_generation_call.result，随后解码、原子保存并交付一张图片；不再次请求上游。",
+      "files": [],
+      "expectations": [
+        "Accepts the exact top-level output image_generation_call shape",
+        "Selects one result before decoding it once",
+        "Does not retry or issue another image request"
+      ]
+    },
+    {
+      "id": 24,
+      "prompt": "同步生图响应是 response.output 包装，里面有一条消息、一个 partial image 和唯一一个最终 image_generation_call.result。",
+      "expected_output": "只在精确的 response.output[] 容器中过滤最终 image_generation_call，忽略消息和 partial image，选择唯一最终结果后解码并交付；不递归扫描其他字段。",
+      "files": [],
+      "expectations": [
+        "Accepts the exact response.output image-generation shape",
+        "Ignores non-image and partial-image entries",
+        "Does not recursively scan arbitrary response fields"
       ]
     }
   ]

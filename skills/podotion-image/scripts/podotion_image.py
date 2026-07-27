@@ -270,6 +270,31 @@ class ImageCandidateError(RuntimeError):
         }
 
 
+class ImageResponseError(RuntimeError):
+    """A successful provider response did not contain one supported final image."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        top_level_keys: Sequence[str],
+        unknown_top_level_key_count: int,
+        selected_shape: str | None,
+        candidate_count: int,
+    ) -> None:
+        super().__init__(message)
+        self._details = {
+            "top_level_keys": list(top_level_keys),
+            "unknown_top_level_key_count": unknown_top_level_key_count,
+            "selected_shape": selected_shape,
+            "candidate_count": candidate_count,
+        }
+
+    @property
+    def details(self) -> dict[str, Any]:
+        return dict(self._details)
+
+
 def normalize_ratio(value: str) -> str:
     ratio = value.strip().replace("：", ":")
     if ratio not in SUPPORTED_RATIOS:
@@ -924,36 +949,138 @@ def _classify_result_value(
     )
 
 
-def extract_image_results(payload: Mapping[str, Any]) -> list[ImageResult]:
-    """Extract exactly one image from the standard ImagesResponse data array."""
+def _safe_response_keys(payload: Mapping[str, Any]) -> tuple[list[str], int]:
+    allowed = {
+        "created",
+        "data",
+        "id",
+        "model",
+        "object",
+        "output",
+        "response",
+        "status",
+        "usage",
+    }
+    keys = sorted(key for key in payload if isinstance(key, str) and key in allowed)
+    return keys, max(0, len(payload) - len(keys))
 
-    data = payload.get("data")
-    if not isinstance(data, list):
-        raise RuntimeError("provider ImagesResponse data must be an array")
-    if len(data) != 1:
-        raise RuntimeError(
-            f"provider ImagesResponse data must contain exactly one image; got {len(data)}"
-        )
-    item = data[0]
-    if not isinstance(item, Mapping):
-        raise RuntimeError("provider ImagesResponse data[0] must be an object")
 
+def _result_from_item(
+    item: Mapping[str, Any], source: str, field_names: Sequence[str]
+) -> ImageResult | None:
     mime_type = str(item.get("mime_type") or "").strip() or None
     output_format = str(item.get("output_format") or "").strip() or None
-    for field_name in ("b64_json", "url"):
+    for field_name in field_names:
         value = item.get(field_name)
         if isinstance(value, str) and value.strip():
-            return [
-                _classify_result_value(
-                    value,
-                    field_name,
-                    f"$.data[0].{field_name}",
-                    mime_type,
-                    output_format,
-                )
-            ]
-    raise RuntimeError(
-        "provider ImagesResponse data[0] did not include a b64_json or url result"
+            normalized = value.strip()
+            result_field = (
+                "url"
+                if field_name == "url" or normalized.lower().startswith("https://")
+                else field_name
+            )
+            return _classify_result_value(
+                value,
+                result_field,
+                f"{source}.{field_name}",
+                mime_type,
+                output_format,
+            )
+    return None
+
+
+def _response_image_candidates(items: Sequence[Any], source: str) -> list[ImageResult]:
+    results: list[ImageResult] = []
+    missing = object()
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping) or item.get("type") != "image_generation_call":
+            continue
+        status = item.get("status", missing)
+        if status is not missing and (
+            not isinstance(status, str) or status.strip().lower() != "completed"
+        ):
+            continue
+        if "partial_image" in item or "partial_image_b64" in item:
+            continue
+        result = _result_from_item(
+            item, f"{source}[{index}]", ("result", "b64_json", "url")
+        )
+        if result is not None:
+            results.append(result)
+    return results
+
+
+def extract_image_results(payload: Mapping[str, Any]) -> list[ImageResult]:
+    """Extract one image from a known synchronous OpenAI image response shape."""
+
+    top_level_keys, unknown_top_level_key_count = _safe_response_keys(payload)
+    missing = object()
+    data = payload.get("data", missing)
+    if data is not missing and data is not None and not isinstance(data, list):
+        raise ImageResponseError(
+            "provider image response data must be an array",
+            top_level_keys=top_level_keys,
+            unknown_top_level_key_count=unknown_top_level_key_count,
+            selected_shape="$.data",
+            candidate_count=0,
+        )
+    if isinstance(data, list) and data:
+        if len(data) != 1:
+            raise ImageResponseError(
+                f"provider image response must contain exactly one image; got {len(data)}",
+                top_level_keys=top_level_keys,
+                unknown_top_level_key_count=unknown_top_level_key_count,
+                selected_shape="$.data",
+                candidate_count=len(data),
+            )
+        item = data[0]
+        if not isinstance(item, Mapping):
+            raise ImageResponseError(
+                "provider image response did not contain one supported final image",
+                top_level_keys=top_level_keys,
+                unknown_top_level_key_count=unknown_top_level_key_count,
+                selected_shape="$.data",
+                candidate_count=0,
+            )
+        result = _result_from_item(item, "$.data[0]", ("b64_json", "url"))
+        if result is None:
+            raise ImageResponseError(
+                "provider image response did not contain one supported final image",
+                top_level_keys=top_level_keys,
+                unknown_top_level_key_count=unknown_top_level_key_count,
+                selected_shape="$.data",
+                candidate_count=0,
+            )
+        return [result]
+
+    containers: list[tuple[str, Any]] = [("$.output", payload.get("output"))]
+    response = payload.get("response")
+    containers.append(
+        (
+            "$.response.output",
+            response.get("output") if isinstance(response, Mapping) else None,
+        )
+    )
+    for source, items in containers:
+        if not isinstance(items, list) or not items:
+            continue
+        results = _response_image_candidates(items, source)
+        if len(results) != 1:
+            raise ImageResponseError(
+                f"provider image response must contain exactly one final image; got {len(results)}",
+                top_level_keys=top_level_keys,
+                unknown_top_level_key_count=unknown_top_level_key_count,
+                selected_shape=source,
+                candidate_count=len(results),
+            )
+        return results
+
+    raise ImageResponseError(
+        "provider image response did not contain one supported final image",
+        top_level_keys=top_level_keys,
+        unknown_top_level_key_count=unknown_top_level_key_count,
+        selected_shape=None,
+        candidate_count=0,
     )
 
 
@@ -2011,7 +2138,7 @@ def run_generation(args: argparse.Namespace, operation: str) -> dict[str, Any]:
         try:
             results = extract_image_results(response)
             saved, warnings = save_image_results(results, output_dir, TIMEOUT_SECONDS)
-        except ImageCandidateError as exc:
+        except (ImageCandidateError, ImageResponseError) as exc:
             error = ProviderRequestError(
                 str(exc),
                 error_kind="output_decode_error",
@@ -2212,7 +2339,7 @@ def run_doctor(args: argparse.Namespace) -> dict[str, Any]:
             })
         except ProviderRequestError as exc:
             capability["error"] = exc.as_json()
-        except ImageCandidateError as exc:
+        except (ImageCandidateError, ImageResponseError) as exc:
             capability["error"] = {
                 "type": type(exc).__name__,
                 "error_kind": "output_decode_error",

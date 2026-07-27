@@ -72,7 +72,11 @@ class SkillContractTests(unittest.TestCase):
 
     def test_single_request_and_serial_multi_image_contract_are_explicit(self) -> None:
         self.assertIn("requests exactly one image with `n=1`", self.skill)
-        self.assertIn("exactly one top-level Images API `data[]` item", self.skill)
+        self.assertIn("standard Images API `data[]`", self.skill)
+        self.assertIn("`output[]` or `response.output[]`", self.skill)
+        self.assertIn("Never merge containers", self.skill)
+        self.assertIn("recursively scan arbitrary wrappers", self.skill)
+        self.assertIn("partial-image fields", self.skill)
         self.assertIn("Use only the basic synchronous Images API", self.skill)
         self.assertIn("Do not call an `/async` endpoint", self.skill)
         self.assertIn("do not send `stream=true`", self.skill)
@@ -132,6 +136,7 @@ class SkillContractTests(unittest.TestCase):
             "严格串行",
             "最多串行生成 10 张",
             "completed_unusable",
+            "response.output",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, combined)

@@ -167,6 +167,42 @@ class RequestStateTests(unittest.TestCase):
         self.assertEqual(status["effective_status"], "outcome_unknown")
         self.assertEqual(blocked.exception.error_kind, "request_outcome_unknown")
 
+    def test_completed_unusable_wrapper_blocks_equivalent_resubmission(self) -> None:
+        response = {
+            "output": [
+                {"type": "image_generation_call", "result": PNG_B64},
+                {"type": "image_generation_call", "result": PNG_B64},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            self.module, "load_direct_provider", return_value=self.provider()
+        ), mock.patch.object(
+            self.module, "post_images", return_value=response
+        ) as post:
+            with self.assertRaises(self.module.ProviderRequestError):
+                self.module.run_generation(
+                    self.args(temp_dir, "unusable-wrapper-0001"), "generate"
+                )
+            status = self.module.get_request_status(
+                temp_dir, "unusable-wrapper-0001"
+            )
+            with self.assertRaises(self.module.ProviderRequestError):
+                self.module.run_generation(
+                    self.args(temp_dir, "unusable-wrapper-0001"), "generate"
+                )
+            with self.assertRaises(self.module.ProviderRequestError) as blocked:
+                self.module.run_generation(
+                    self.args(
+                        temp_dir, "unusable-wrapper-0002", force_new=True
+                    ),
+                    "generate",
+                )
+
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(status["effective_status"], "completed_unusable")
+        self.assertFalse(status["safe_to_retry"])
+        self.assertEqual(blocked.exception.error_kind, "request_outcome_unknown")
+
     def test_403_is_recorded_as_definitive_failure(self) -> None:
         upstream = self.module.ProviderRequestError(
             "not enabled",
