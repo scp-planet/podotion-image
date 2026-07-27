@@ -206,12 +206,13 @@
     {
       "id": 19,
       "prompt": "用同一个提示词生成 3 张彼此独立的 2K 猫咪电影海报。",
-      "expected_output": "先一次性完成预检、尺寸、凭据和输出目录解析；随后使用同一 state_scope、三个独立 request_key 严格串行调用三次 generate。每次请求固定 n=1；第二、第三次使用 --force-new。上一张完成保存和状态落盘后才开始下一张，最终展示三张结果。",
+      "expected_output": "先一次性完成预检、尺寸、凭据和输出目录解析；随后使用同一 state_scope、三个独立 request_key 严格串行调用三次基础同步 generate。每次请求固定 n=1，不使用 async 或 stream；第二、第三次使用 --force-new。上一张完成保存和状态落盘后立即展示该张结果，再开始下一张。",
       "files": [],
       "expectations": [
         "Uses three sequential single-image actions rather than one multi-image request",
         "Uses one stable state_scope and three distinct request keys",
         "Uses --force-new for the second and third identical-prompt variations",
+        "Presents each successful image before starting the next action",
         "Never launches the billable actions in parallel"
       ]
     },

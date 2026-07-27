@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import http.client
 import io
 import json
 import sys
@@ -108,6 +109,37 @@ class ProviderRequestTests(unittest.TestCase):
         ) as request:
             self.post(self.provider())
         self.assertEqual(request.call_args.args[1], 600)
+
+    def test_generation_uses_basic_synchronous_images_endpoint(self) -> None:
+        success = mock_json_response({"data": [{"b64_json": PNG_B64}]})
+        with mock.patch.object(
+            self.module, "_open_provider_request", return_value=success
+        ) as opened:
+            result = self.module.post_images(
+                self.provider(), "generate", "draw a cat", size="2048x2048"
+            )
+
+        request = opened.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.full_url, "https://ai.podotion.com/v1/images/generations")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(payload["n"], 1)
+        self.assertNotIn("stream", payload)
+        self.assertNotIn("async", request.full_url)
+        self.assertEqual(result, {"data": [{"b64_json": PNG_B64}]})
+
+    def test_incomplete_read_is_reported_as_submitted_upstream_failure(self) -> None:
+        error = http.client.IncompleteRead(b" \n" * 3)
+        with mock.patch.object(
+            self.module, "_open_provider_request", side_effect=error
+        ) as request:
+            with self.assertRaises(self.module.ProviderRequestError) as raised:
+                self.post(self.provider())
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(raised.exception.error_kind, "upstream_error")
+        self.assertEqual(raised.exception.attempts, 1)
+        self.assertIsNotNone(raised.exception.elapsed_ms)
 
     def test_403_is_not_retried_and_has_structured_fields(self) -> None:
         error = http_error(

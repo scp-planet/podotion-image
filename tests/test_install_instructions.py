@@ -110,10 +110,18 @@ class InstallInstructionTests(unittest.TestCase):
     def test_single_request_and_serial_multi_image_behavior_is_documented(self) -> None:
         self.assertIn("每次上游请求固定 `n=1`", self.readme)
         self.assertIn("只接受一张标准 `data[]` 结果", self.readme)
+        self.assertIn("只使用最基础的同步 Images API", self.readme)
+        self.assertIn("不调用 `/async`", self.readme)
+        self.assertIn("不发送 `stream=true`", self.readme)
         self.assertIn("最多串行执行 10 个独立图片操作", self.readme)
         self.assertIn("绝不并行", self.readme)
+        self.assertIn("每生成并保存一张就立即返回该张结果", self.readme)
         self.assertIn("相同提示词的第二张及以后使用 `--force-new`", self.readme)
         self.assertIn("后续图片不再执行", self.readme)
+
+    def test_user_facing_errors_are_documented_as_concise(self) -> None:
+        self.assertIn("一条简洁、脱敏的错误原因", self.readme)
+        self.assertIn("不展示上游原始响应、堆栈、密钥或完整诊断对象", self.readme)
 
 
 if __name__ == "__main__":

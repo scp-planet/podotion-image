@@ -39,6 +39,7 @@ class ImagesPayloadTests(unittest.TestCase):
                 "n": 1,
             },
         )
+        self.assertNotIn("stream", payload)
 
     def test_edit_multipart_repeats_image_array_parts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -67,6 +68,7 @@ class ImagesPayloadTests(unittest.TestCase):
         self.assertEqual(fields["quality"], "auto")
         self.assertEqual(fields["output_format"], "png")
         self.assertEqual(fields["n"], "1")
+        self.assertNotIn("stream", fields)
         self.assertEqual(len(images), 2)
         self.assertTrue(all(part["content_type"] == "image/png" for part in images))
         self.assertTrue(all(part["data"] == PNG_BYTES for part in images))

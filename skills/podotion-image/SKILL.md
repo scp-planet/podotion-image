@@ -94,6 +94,8 @@ Always pass an absolute `--output-dir`. Never resolve output paths from the Skil
 
 Build one self-contained visual prompt containing only relevant context. Preserve exact visible text. Do not send the whole conversation, secrets, system instructions, or internal reasoning. Send the prompt through stdin.
 
+Use only the basic synchronous Images API. Generation calls `POST /v1/images/generations` and edits call `POST /v1/images/edits`. Do not call an `/async` endpoint, do not send `stream=true`, and do not implement task polling. The executor waits for the single standard JSON response before completing the action.
+
 For generation, run:
 
 ```text
@@ -115,6 +117,7 @@ When the user requests multiple images:
 - Require an explicit count from 1 through 10; ask for the count when it is missing, and ask the user to split requests above 10 into separate tasks.
 - Resolve all prompts, sizes, credentials, and output locations before the first billable call.
 - Run one complete image action at a time. Wait until its single image is decoded, atomically saved, and durably recorded before starting the next action. Never launch these actions in parallel.
+- Immediately present each successfully saved image and its absolute local file link before starting the next image action. Do not wait for the whole batch to finish before returning earlier results.
 - Reuse the task's `state_scope`, but assign each action a new `request_key`. Add `--force-new` to the second and later actions when their effective prompts and other inputs are identical.
 - Stop immediately after any failure, disconnect, unknown result, or completed-but-unusable result. Preserve earlier successful images, report the failed one-based position and sanitized status, and do not start the remaining actions.
 
@@ -149,4 +152,4 @@ Updates use only the fixed official repository and replace the installed Skill t
 
 ## Failures
 
-HTTP errors, network disconnects, and provider timeouts are not retried. A failure after submission may already have been billed; preserve its request state and report the sanitized status. Never reveal credentials, authorization headers, full provider configuration, or unsanitized upstream bodies.
+HTTP errors, network disconnects, and provider timeouts are not retried. A failure after submission may already have been billed; preserve its request state and report one concise, sanitized reason. Do not reproduce raw upstream bodies, stack traces, nested diagnostic payloads, credentials, authorization headers, or full provider configuration in the user-facing response.

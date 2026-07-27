@@ -9,6 +9,7 @@ import binascii
 import contextlib
 import errno
 import hashlib
+import http.client
 import ipaddress
 import json
 import math
@@ -823,7 +824,13 @@ def post_provider_request(
             first_http_status=int(exc.code),
             first_error_message=message,
         ) from exc
-    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        ConnectionError,
+        TimeoutError,
+        socket.timeout,
+    ) as exc:
         reason_value = exc.reason if isinstance(exc, urllib.error.URLError) else exc
         reason = redact_secrets(str(reason_value), (*provider.secret_values, prompt))
         raise ProviderRequestError(

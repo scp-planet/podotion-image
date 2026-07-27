@@ -73,12 +73,22 @@ class SkillContractTests(unittest.TestCase):
     def test_single_request_and_serial_multi_image_contract_are_explicit(self) -> None:
         self.assertIn("requests exactly one image with `n=1`", self.skill)
         self.assertIn("exactly one top-level Images API `data[]` item", self.skill)
+        self.assertIn("Use only the basic synchronous Images API", self.skill)
+        self.assertIn("Do not call an `/async` endpoint", self.skill)
+        self.assertIn("do not send `stream=true`", self.skill)
         self.assertIn("explicit count from 1 through 10", self.skill)
         self.assertIn("Never launch these actions in parallel", self.skill)
+        self.assertIn("Immediately present each successfully saved image", self.skill)
+        self.assertIn("before starting the next image action", self.skill)
         self.assertIn("second and later actions", self.skill)
         self.assertIn("`--force-new`", self.skill)
         self.assertIn("Stop immediately after any failure", self.skill)
         self.assertIn("Preserve earlier successful images", self.skill)
+
+    def test_user_facing_failures_are_concise_and_sanitized(self) -> None:
+        self.assertIn("one concise, sanitized reason", self.skill)
+        self.assertIn("Do not reproduce raw upstream bodies", self.skill)
+        self.assertIn("stack traces", self.skill)
 
     def test_lifecycle_and_non_billable_doctor_are_explicit(self) -> None:
         self.assertIn("manage.py update --dry-run", self.skill)
