@@ -1,0 +1,77 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            asset: podotion-image-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            asset: podotion-image-windows-arm64.exe
+          - goos: darwin
+            goarch: amd64
+            asset: podotion-image-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            asset: podotion-image-darwin-arm64
+          - goos: linux
+            goarch: amd64
+            asset: podotion-image-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset: podotion-image-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - name: Verify runtime manifest
+        run: |
+          set -eu
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          grep -q "\"version\": \"$version\"" skills/podotion-image/runtime.json
+          grep -q "\"tag\": \"$tag\"" skills/podotion-image/runtime.json
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -eu
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.asset }}" ./cmd/podotion-image
+          cd dist
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podotion-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

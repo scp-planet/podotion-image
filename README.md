@@ -1,115 +1,151 @@
 # Podotion Image
 
-Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill。它使用 Python 标准库调用 Podotion Images API，固定使用 `gpt-image-2`，支持生成、编辑、精确尺寸、请求恢复、双 SK 路由、诊断、更新和卸载。
+Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill。它使用 Go 原生 CLI 调用 Podotion Images API，支持生成、编辑、精确尺寸、请求恢复、双 SK 路由、诊断、更新、旧 Plugin 迁移和卸载。
 
-Skill 的完整运行边界位于 `skills/podotion-image`。安装后不需要 Plugin Marketplace、MCP 注册或第三方 Python 包。
+用户不需要安装 Python、Node、Git 或其他运行时。Skill 首次运行时会从固定 GitHub Releases 下载与当前 OS/架构匹配的静态二进制，校验 SHA-256 后缓存到：
+
+```text
+$CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
+```
+
+生图模型可配置。全新配置默认使用 `gpt-image-2.5`；已有配置不会被安装或更新流程修改。
+
+## 主要变化
+
+- **去 Python 化**：正式运行路径不再包含 Python 脚本，也不要求用户安装解释器。
+- **原生 CLI**：Windows、macOS、Linux 的 amd64 与 arm64 均提供 `CGO_ENABLED=0` 静态二进制。
+- **模型可配置**：支持 `provider.toml` 的 `model` 字段、单次 `--model` 覆盖和 `config set-model`；全新配置默认 `gpt-image-2.5`。
+- **原生更新**：`update` 直接通过 HTTPS 下载 GitHub ZIP，不再依赖 Git。
+- **轻量 Skill**：Skill 目录只保留 `SKILL.md`、`agents/openai.yaml`、`runtime.json` 和 `bin/` 启动器。
 
 ## 功能与取舍
 
 - `auto`、1K、2K 和未达到 4K 标准的精确尺寸使用 `PodotionImageSk`。
 - 显式 4K 档、规范 4K 档尺寸或总像素达到 8,294,400 时使用 `PodotionImage4kSk`。
 - 旧单 SK 配置继续支持非 4K 请求；4K SK 缺失时在联网和写请求状态前失败，不回退默认 SK。
+- 旧 `provider.toml` 没有 `model` 字段时继续使用 `gpt-image-2`，升级不会改变现有用户行为。
+- 模型优先级固定为：`--model` > `provider.toml` 的 `model` > 新配置默认 `gpt-image-2.5`（旧配置缺省为 `gpt-image-2`）。
+- 不根据模型名自动推断能力；尺寸、4K 和双 SK 规则保持不变。未知模型由上游报错。
 - 用户给出的合法精确像素尺寸会原样发送，不映射到最近档位。
 - 每次上游请求固定 `n=1`，从标准 `data[]` 或明确兼容的 `output[]`、`response.output[]` 中只接受一张最终结果；每个图片操作最多发送一次 POST，不自动重试，请求超时固定为 600 秒。
-- 只使用最基础的同步 Images API：生成调用 `POST /v1/images/generations`，编辑调用 `POST /v1/images/edits`；不调用 `/async`，不发送 `stream=true`，不轮询异步任务。
-- 用户需要多张图片时由 Skill 最多串行执行 10 个独立图片操作，绝不并行；每生成并保存一张就立即返回该张结果，再开始下一张。任一操作失败或结果不确定时立即停止，保留此前成功图片。
+- 只使用同步 Images API：生成调用 `POST /v1/images/generations`，编辑调用 `POST /v1/images/edits`；不调用 `/async`，不发送 `stream=true`，不轮询异步任务。
+- 多图请求由 Skill 最多串行执行 10 个独立图片操作，绝不并行；每生成并保存一张就立即返回该张结果。
 - 图片保存在用户工作区，并在回复正文中提供 Markdown 预览和绝对文件链接。
 - `doctor` 只做配置和连通性检查，不计费；`doctor --image-probe` 会真实生图并可能计费。
 
-纯 Skill 不再提供 MCP `image`、`resource_link`、`resources/list`、`resources/read`、`publish_existing_image` 或 Codex Outputs 面板登记。这是使用标准 Skills Install 和保持目录自包含所需的明确取舍；PNG、正文预览和本地文件链接仍会保留。
+Skill 不提供 MCP `image`、`resource_link`、`resources/list`、`resources/read`、`publish_existing_image` 或 Codex Outputs 面板登记。PNG、正文预览和本地文件链接仍然保留。
 
-## 为什么旧版不能 Skills Install
+## 安装与首次运行
 
-标准 Skill 安装器只校验并复制指定的 Skill 目录到 `$CODEX_HOME/skills/<name>`。它不会执行安装钩子，不会复制仓库根目录代码，也不会注册 `.mcp.json` 或个人 Marketplace。
+使用标准 Skills Install 安装 `skills/podotion-image` 后，重启 Codex 并新建任务。
 
-旧版存在三处硬依赖：
+首次执行任意图片、诊断或配置命令时：
 
-- `SKILL.md` 要求调用只由 Plugin 注册的 MCP 工具。
-- Skill 执行器导入仓库根部的 `podotion_image.paths`，单独复制后无法启动。
-- 根 `scripts/install.py` 安装的是完整 Plugin 并修改 Marketplace，不属于 Skills Install 流程。
+1. 启动器读取 Skill 目录中的 `runtime.json`。
+2. 按当前 OS/架构选择固定 GitHub Release 资源。
+3. 下载二进制及其 `.sha256` 文件。
+4. 校验 SHA-256 后写入版本化缓存目录。
+5. 运行缓存中的二进制。
 
-本次重构把运行脚本、配置模板和生命周期工具全部收进 Skill 子目录，并删除 Plugin/MCP 安装面。标准安装 URL 必须包含 Skill 子路径；裸仓库 URL 无法确定要安装哪个目录。
+缓存命中后不会重复下载。更新会使用新的版本目录，避免 Windows 覆盖正在运行的可执行文件。未签名的 macOS/Windows 二进制可能触发系统安全提示；后续可增加代码签名。
 
-## 系统要求
+## 配置
 
-- Codex Desktop、Codex CLI 或 IDE extension。
-- Python 3.11 或更高版本，仅使用标准库，无需 `pip install`。
-- 生图和 `doctor` 需要访问 `https://ai.podotion.com/v1`。
-- 首次安装需要访问 GitHub；内置更新还需要 Git。
-- 两个 SK 所属分组按用途启用 `gpt-image-2`。
-
-安装 Codex 不代表系统一定提供可由普通 Skill 调用的 Python。Windows 可安装官方 Python 后使用 `py -3`；macOS、Linux 和 WSL 使用原生 `python3`。不要跨 Windows 和 WSL 混用解释器。
-
-## 使用 Skills Install 首次安装
-
-将下面两行发给 Codex；安装阶段不提交或配置任何 SK：
+用户配置入口只有：
 
 ```text
-$skill-installer
-https://github.com/scp-planet/podotion-image/tree/main/skills/podotion-image
+$CODEX_HOME/podotion-image/provider.toml
 ```
 
-安装完成后重启 Codex 并新建任务。不要在安装任务中发送 SK、配置凭据、运行 `doctor` 或迁移旧 Plugin；这些动作会在首次真实图片任务中按需处理。安装器如果报告目标目录已存在，停止首次安装并改用已安装 Skill 的 `manage.py update`，不要覆盖目录。
-
-标准 `skill-installer` 对公开 GitHub 仓库默认可直接下载 ZIP，并在需要时使用它自己的 Git fallback。首次安装的传输行为由系统安装器管理；下文的固定浅克隆和 Schannel 策略专用于安装后的自更新。
-
-## 首次图片任务预检与凭据
-
-每个新任务的第一次生成或编辑之前，Skill 先运行本地、只读的 `configure_direct.py --check` 和 `manage.py status`。预检不访问 Podotion、不生成图片、不写文件，也不输出 SK；同一任务后续图片操作不重复运行。
-
-- 如果默认凭据尚未配置，Skill 先索取 `PodotionImageSk`，不发起图片请求。
-- 如果用户请求 4K 而配置中缺少 4K 凭据，Skill 只索取 `PodotionImage4kSk`；非 4K 请求不要求 4K SK。
-- 如果检测到可安全自动清理的旧 Plugin，Skill 在每个新任务首次预检时询问是否迁移。用户本任务拒绝后可以继续使用 standalone Skill，但下一个新任务仍会再次询问，直到迁移完成；检测结果不安全或不明确时只报告脱敏状态，不询问或尝试清理。
-
-凭据可以用以下任一方式提供：
-
-- 在当前消息中写一行 `PodotionImageSk=<value>` 或 `PodotionImage4kSk=<value>`。
-- 附加一个 UTF-8 文本文件，内容使用相同的 `KEY=value` 行；同时配置两个 profile 时每个 key 各占一行，且不包含其他字段。
-
-附件方式避免把 SK 字面量放进聊天提示正文或进程命令行参数，但附件内容仍是当前 Codex 会话的输入，并不是会话外的秘密通道。正文中的赋值块会原样通过配置器 stdin 解析；附件有本地路径时使用 `--input-file` 直接读取，没有路径时才把附件内容通过 stdin 传递。Skill 不在回复、命令参数或日志中复述 SK，也不会扫描其他文件。
-
-配置文件位于 `$CODEX_HOME/podotion-image/provider.toml`；`CODEX_HOME` 未设置时使用当前原生平台的 `~/.codex/podotion-image/provider.toml`。该文件在 Skill 安装目录和 Git 仓库之外。
-
-规范配置包含：
+示例：
 
 ```toml
 base_url = "https://ai.podotion.com/v1"
-PodotionImageSk = "<default>"
-PodotionImage4kSk = "<4k>"
+model = "gpt-image-2.5"
+PodotionImageSk = "sk-..."
+PodotionImage4kSk = "sk-..."
 ```
 
-旧文件只有 `PodotionImageSk` 时会被原位读取，不需要复制或扫描 Plugin cache。正文配置把一个或两个 `KEY=value` 赋值行通过 stdin 交给：
+`model` 和 `PodotionImage4kSk` 都是可选项。新建配置时 `model` 默认为 `gpt-image-2.5`；已有配置缺少 `model` 时仍按 `gpt-image-2` 解释。Skill 安装或更新不会改写 `provider.toml`。`base_url` 固定为 `https://ai.podotion.com/v1`。
+
+### 写入凭据
+
+Windows：
 
 ```text
-configure_direct.py --stdin --force
+<skill_dir>\bin\podotion-image.cmd config --stdin --force
 ```
 
-按需补充 4K SK 时，把 `PodotionImage4kSk=<value>` 作为一行标准输入传给：
+macOS / Linux / WSL：
 
 ```text
-configure_direct.py --set-4k --stdin --force
+sh <skill_dir>/bin/podotion-image.sh config --stdin --force
 ```
 
-附件配置使用 `configure_direct.py --input-file <attachment-path> --force`；仅补充 4K 时再加 `--set-4k`。配置写入使用同目录临时文件和原子替换，附件原文件不会被修改或删除。
+stdin 接受 `KEY=value` 形式的赋值，也接受一到两行裸值（默认 SK、可选 4K SK）。追加 4K：
 
-任何成功的配置写入后，Skill 都会在当前任务运行不带 `--image-probe` 的非计费 `doctor`；doctor 成功且用户已经同意迁移时，再自动清理旧 Plugin。完成配置和可选迁移后停止当前任务，提示用户重启 Codex 并新建任务，不继续原始生图。doctor 失败时不迁移、不生图，只报告脱敏错误。
+```text
+config --stdin --set-4k --force
+```
+
+也可以使用 `config --input-file <path> --force`。凭据不会进入命令行参数。
+
+写入凭据后先运行非计费 `doctor`，再重启 Codex 并新建任务。
+
+### 配置默认模型
+
+```text
+config set-model gpt-image-3
+config --check
+```
+
+`set-model` 会保留已有 SK，只更新 `provider.toml` 的 `model`。自然语言行为：
+
+- “以后默认用 `gpt-image-3`” → 运行 `config set-model gpt-image-3`。
+- “这次用 `gpt-image-2` 生成” → 该次命令追加 `--model gpt-image-2`，不持久化。
+- “用默认模型” → 省略 `--model`。
+
+## 使用
+
+安装并重启后直接描述任务。Skill 会在每个新任务的首次图片操作前执行一次本地预检：
+
+```text
+config --check
+status
+```
+
+```text
+生成一张 2560x1440 的绿色山谷头图，保存到 assets/generated。
+```
+
+```text
+生成一张 4K、16:9 的产品海报，然后把上一张图的背景改成白色。
+```
+
+```text
+以后默认用 gpt-image-3
+```
+
+```text
+这次用 gpt-image-2 生成一张 3:2 的封面，下次继续用默认模型。
+```
+
+相对输出目录以活动项目 workspace 为基准；未指定时使用 `<workspace>/PodotionImageOutput`。存在多个合理路径或编辑源时，Skill 会在计费请求前询问。
+
+同一任务复用稳定的 `state_scope`，每个独立图片操作使用新的 `request_key`。断连后使用同一组标识运行 `request-status`，不要换 key 重发。只有用户明确承认请求可能已计费时，才运行 `request-abandon --acknowledge-possible-charge`。
 
 ## 分辨率与 SK 路由
 
-`gpt-image-2` 接受满足以下条件的任意 `WIDTHxHEIGHT`：
+当前 Skill 对所有模型发送相同的尺寸规则，不根据模型名推断能力：
 
 - 最长边不超过 3840 像素。
 - 宽和高都是 16 的倍数。
 - 长边与短边之比不超过 3:1。
 - 总像素不少于 655,360 且不超过 8,294,400。
 
-来源：[OpenAI Image generation](https://developers.openai.com/api/docs/guides/image-generation) 与 [gpt-image-2 size options](https://developers.openai.com/cookbook/examples/multimodal/image-gen-models-prompting-guide#gpt-image-2-size-options)。
+用户只给出“4K + 比例”时，使用以下固定映射：
 
-`gpt-image-2` 在上述限制内支持任意 `WIDTHxHEIGHT`，但大于 2K 的输出仍属于实验性能力。这里的 `4K` 表示“OpenAI 限制内、符合目标比例的最高分辨率档”，不是在所有比例下都强制使用某个固定边长。只有 `3840x2160` 和 `2160x3840` 是 UHD 4K；电影级 DCI 4K `4096x2160` 超过 3840 像素边长限制，不能直接请求，也不会被静默缩小。
-
-用户只给出“4K + 比例”时，Skill 使用以下固定映射：
-
-| 比例 | OpenAI 兼容的 4K 档尺寸 |
+| 比例 | 4K 档尺寸 |
 | --- | --- |
 | `1:1` | `2880x2880` |
 | `2:3` | `2336x3504` |
@@ -121,8 +157,6 @@ configure_direct.py --set-4k --stdin --force
 | `19:10` | `3648x1920` |
 | `10:19` | `1920x3648` |
 
-“电影比例”“DCI 比例”和 `1.90:1` 作为粗略比例意图时按 `19:10` 处理；精确请求 `4096x2160` 仍会因越界而拒绝。字面比例 `19:6` 超过 3:1 限制，不受支持。
-
 | 用户意图或最终尺寸 | 请求形式 | SK |
 | --- | --- | --- |
 | 未指定尺寸 | `auto` | `PodotionImageSk` |
@@ -131,82 +165,100 @@ configure_direct.py --set-4k --stdin --force
 | 4K 档解析出的规范尺寸 | 精确尺寸 | `PodotionImage4kSk` |
 | 总像素达到 8,294,400 | 精确尺寸 | `PodotionImage4kSk` |
 
-例如 `2560x1440` 使用默认 SK，`3840x2160` 使用 4K SK。路由由执行器根据结构化尺寸意图选择；Codex 不读取或拼接密钥。
+例如 `2560x1440` 使用默认 SK，`3840x2160` 使用 4K SK。
 
-## 使用
-
-安装并重启后直接描述任务。Skill 会先完成本任务唯一一次本地预检；若需要写入凭据，它会先完成非计费 doctor 和已授权的旧版迁移，再停止并要求用户重启、新建任务、重新提出图片请求：
+## 命令
 
 ```text
-生成一张 2560x1440 的绿色山谷头图，保存到 assets/generated。
+podotion-image generate
+podotion-image edit
+podotion-image doctor [--image-probe]
+podotion-image sizes
+podotion-image config --check
+podotion-image config --stdin --force
+podotion-image config set-model <name>
+podotion-image status
+podotion-image update [--dry-run]
+podotion-image uninstall --yes
+podotion-image uninstall-legacy-plugin --yes
+podotion-image request-status
+podotion-image request-abandon
 ```
+
+生成示例：
 
 ```text
-生成一张 4K、16:9 的产品海报，然后把上一张图的背景改成白色。
+generate --prompt "<prompt>" --request-key <key> [--model <name>] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
 ```
 
-相对输出目录以活动项目 workspace 为基准；无项目任务使用 conversation workspace；未指定时使用 `<workspace>/PodotionImageOutput`。存在多个合理路径或编辑源时，Skill 会在计费请求前询问。
+编辑示例：
 
-同一任务复用稳定的 `state_scope`，每个独立图片操作使用新的 `request_key`。断连后使用同一组标识运行 `request-status`，不要换 key 重发。只有用户明确承认请求可能已计费时，才运行 `request-abandon --acknowledge-possible-charge`。
+```text
+edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
+```
 
-每次 `generate` 或 `edit` 都显式请求 `n=1`。执行器优先读取标准 Images API 顶层 `data` 数组；当它缺失、为 `null` 或为空时，也兼容 Responses 风格的顶层 `output`，以及事件包装中的 `response.output`，但只读取 `type=image_generation_call` 且未提供状态或明确为 `status=completed` 的 `result`、`b64_json` 或 `url`。不同容器不会合并，也不会递归扫描任意包装或读取 partial-image 字段；选定结果后才进行一次解码或下载。同一 `data` 对象优先使用 `b64_json`，仅在缺失时使用 `url`。选定容器的最终图片数量不等于一时，在保存 PNG 前按不可用结果停止，且不会自动重试。
-
-响应协议错误只记录受限的顶层字段名、选中的已知结构和最终图片候选数量，用于定位兼容问题；不会记录响应正文、Base64 图片、提示词或凭据。
-
-需要多张图片时，请明确给出 1 到 10 的数量。Skill 会在首次计费调用前一次性确认所有图片的提示词、尺寸、凭据路由和输出目录，然后逐张串行执行：上一张完成解码、原子保存和请求状态落盘后，立即展示该张图片和本地文件链接，再开始下一张。每张使用独立 `request_key`；相同提示词的第二张及以后使用 `--force-new`，避免复用第一张。任一张失败、断连或状态不确定时，后续图片不再执行，已成功图片继续保留。
-
-同步请求失败时，Skill 只向用户返回一条简洁、脱敏的错误原因，不展示上游原始响应、堆栈、密钥或完整诊断对象。
+成功结果包含 `ok`、`operation`、`model`、`credential_profile`、`request`、`images[]`、`warnings` 和 `state_path`。失败结果写入 stderr，只包含脱敏后的错误信息。
 
 ## 状态、更新和卸载
 
-这些操作可通过自然语言请求 Skill 执行，也可手动运行 `scripts/manage.py`。
+更新固定下载：
 
 ```text
-manage.py status
-manage.py update --dry-run
-manage.py update
-manage.py uninstall-legacy-plugin --yes
-manage.py uninstall --yes
+https://codeload.github.com/scp-planet/podotion-image/zip/refs/heads/main
 ```
 
-更新固定浅克隆 `https://github.com/scp-planet/podotion-image.git` 的 `main`，不接受自定义来源、分支或路径。候选会校验 Skill 名称、必需文件、Python 语法、隔离启动、符号链接和内容摘要，然后在 `$CODEX_HOME` 同卷事务目录中替换安装目录；捕获到替换异常时恢复旧版本。
+不接受自定义来源、分支或路径。候选 ZIP 会校验 Skill 名称、必需文件、路径安全和内容摘要，然后在 `$CODEX_HOME` 同卷事务目录中替换安装目录；失败时恢复旧版本。`--dry-run` 只下载和校验。
 
-仅在原生 Windows 的 Git 输出明确是 Schannel TLS 错误时，更新器才以单条 `git -c http.sslBackend=openssl clone ...` 重试。它不会修改持久 Git 配置、切换所有 Git 请求或关闭证书校验。
+`uninstall-legacy-plugin --yes` 用于从旧 Plugin 迁移。它只删除旧安装器创建的精确 Marketplace 条目和 `~/plugins/podotion-image` source；同名但来源不同的条目会被拒绝。旧 Plugin 不存在时安全跳过。凭据、新 Skill、工作区图片和请求状态不在清理范围内。
 
-`uninstall-legacy-plugin --yes` 用于从旧 Plugin 迁移。每个新任务的首次图片预检只要仍检测到可安全清理的旧 Plugin，就会询问用户是否迁移；拒绝只对当前任务有效。用户同意后，Skill 必须先在本任务运行不计费的 `podotion_image.py doctor`，且不得使用 `--image-probe`。只有 doctor 成功才运行清理；doctor 失败时保留旧 Plugin 并停止迁移。
+`uninstall --yes` 只移除 `$CODEX_HOME/skills/podotion-image`。凭据、工作区图片和请求状态一律保留。更新、迁移或卸载后必须重启 Codex 并新建任务。
 
-清理命令读取旧 Marketplace 名称并调用对应的 `codex plugin remove podotion-image@<marketplace>`（通常是 `podotion-image@personal`），只删除旧安装器创建的精确 Marketplace 条目和 `~/plugins/podotion-image` source；同名但来源不同的条目会被拒绝。旧 Plugin 不存在时命令安全跳过。凭据、新 Skill、工作区图片和请求状态不在清理范围内。迁移成功后立即停止当前任务，提示重启 Codex 并新建任务，不在旧任务中继续生图。
-
-`uninstall --yes` 只移除 `$CODEX_HOME/skills/podotion-image`。凭据、工作区图片和请求状态一律保留；v1 不提供 purge。更新或任一卸载操作后必须重启 Codex 并新建任务。
-
-## 从旧 Plugin 迁移
-
-旧 Plugin 和 standalone Skill 使用相同凭据路径，因此新 Skill 会自动复用已有默认 SK。安装提示词只安装 Skill，不接收凭据，也不清理旧 Plugin。重启后的每个新任务会在首次图片预检中检测旧 Plugin 并询问是否迁移。
-
-用户同意迁移时，Skill 在当前任务运行非计费 `doctor`；不能依赖另一个任务中的旧结果。若同时新增或修改凭据，则先原子写入配置，再运行 doctor。doctor 成功后才调用 `manage.py uninstall-legacy-plugin --yes`；配置或迁移完成后停止并要求重启、新建任务，不执行原始生图。
-
-迁移命令会保留个人 Marketplace 中的其他 Plugin，并拒绝删除任何同名但 source 不是 `./plugins/podotion-image` 的条目。用户不需要手工运行 `codex plugin remove`、编辑 `marketplace.json` 或删除旧 source。完成后只需重启 Codex 并新建任务。
-
-## 项目结构与开发
+## 项目结构
 
 ```text
+cmd/podotion-image/          CLI 入口
+internal/podotion/           生成、编辑、配置、状态、诊断和生命周期实现
 skills/podotion-image/
   SKILL.md
   agents/openai.yaml
-  evals/evals.json
-  scripts/
-    configure_direct.py
-    manage.py
-    podotion_image.py
-  templates/provider.toml
+  runtime.json
+  bin/
+    podotion-image.cmd       Windows 启动器
+    podotion-image.ps1       Windows 下载与校验逻辑
+    podotion-image.sh        macOS/Linux/WSL 启动器
+.github/workflows/           CI 与六平台 Release 构建
 ```
 
-在仓库根目录运行：
+## 开发与测试
+
+要求 Go 1.23+：
 
 ```powershell
-py -3 -m unittest discover -s tests -v
-py -3 -m compileall -q skills\podotion-image\scripts tests
-py -3 "$env:USERPROFILE\.codex\skills\.system\skill-creator\scripts\quick_validate.py" skills\podotion-image
+gofmt -w .
+go vet ./...
+go test ./...
+go build ./cmd/podotion-image
 ```
 
-macOS、Linux 和 WSL 将 `py -3` 替换为 `python3` 并使用 POSIX 路径。发布前还要把 Skill 子目录单独复制到临时目录，以 `python -I` 验证三个脚本，无需也不得执行计费生图。
+测试覆盖：
+
+- 尺寸、4K 映射和双 SK 路由。
+- 旧配置兼容、模型优先级、`set-model` 和凭据解析。
+- 生成、编辑 multipart、Base64、data URL、URL 下载、响应包装、错误脱敏和超时。
+- 请求指纹、幂等复用、模型切换、状态恢复和放弃。
+- GitHub ZIP 更新、更新失败保留旧版本、卸载保留凭据、旧 Plugin 迁移。
+- CLI 黑盒命令。
+- 首次下载、SHA-256 校验失败、缓存命中，以及无 Python 环境运行。
+
+## 发布
+
+`.github/workflows/release.yml` 在 `v*` 标签上构建：
+
+- `windows/amd64`
+- `windows/arm64`
+- `darwin/amd64`
+- `darwin/arm64`
+- `linux/amd64`
+- `linux/arm64`
+
+每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。发布新版本时，需要同步更新 `skills/podotion-image/runtime.json` 中的 `version` 和 `tag`，使其指向已发布的 GitHub Release。

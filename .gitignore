@@ -2,19 +2,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-.coverage
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-.tox/
-.venv/
-venv/
-
 .DS_Store
 Thumbs.db
+.idea
 
 /dist/
 /podotion-image-workspace/
 /PodotionImage/
 /PodotionImageOutput/
-.idea
