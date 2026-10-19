@@ -104,8 +104,14 @@ if (-not (Test-Path -LiteralPath $Binary)) {
             }
             $AssetUrl = "$BaseUrl/$Asset"
             Invoke-WebRequest -UseBasicParsing -Uri $AssetUrl -OutFile $TempBinary
-            $HashText = (Invoke-WebRequest -UseBasicParsing -Uri "$AssetUrl.sha256").Content
-            $Match = [regex]::Match([string]$HashText, '[0-9a-fA-F]{64}')
+            $HashResponse = Invoke-WebRequest -UseBasicParsing -Uri "$AssetUrl.sha256"
+            $HashContent = $HashResponse.Content
+            if ($HashContent -is [byte[]]) {
+                $HashText = [System.Text.Encoding]::UTF8.GetString($HashContent)
+            } else {
+                $HashText = [string]$HashContent
+            }
+            $Match = [regex]::Match($HashText, '[0-9a-fA-F]{64}')
             if (-not $Match.Success) {
                 throw "The published SHA-256 file is invalid."
             }

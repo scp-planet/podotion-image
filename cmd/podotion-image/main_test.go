@@ -247,6 +247,7 @@ func TestLauncherBootstrapChecksumAndCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		atomic.AddInt32(&requests, 1)
 		if strings.HasSuffix(request.URL.Path, ".sha256") {
+			writer.Header().Set("Content-Type", "application/octet-stream")
 			digest, err := fileSHA256(testBinary)
 			if err != nil {
 				http.Error(writer, "hash failed", 500)
@@ -292,6 +293,7 @@ func TestLauncherBootstrapChecksumAndCache(t *testing.T) {
 
 	badServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if strings.HasSuffix(request.URL.Path, ".sha256") {
+			writer.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = writer.Write([]byte(strings.Repeat("0", 64) + "  asset\n"))
 			return
 		}
