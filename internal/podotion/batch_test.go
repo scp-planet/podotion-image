@@ -271,6 +271,27 @@ func TestBatchPreflightZeroPOST(t *testing.T) {
 	}
 }
 
+func TestBatchDoesNotInspectUnrelatedRequestRecords(t *testing.T) {
+	var calls atomic.Int32
+	batchTestServer(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); successImage(w) })
+	opts, _ := batchOptions(t, 3)
+	path, err := requestRecordPath(opts.OutputDir, "unrelated-older-request", opts.StateScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, path, []byte("incomplete unrelated request record"))
+	summary, err := RunBatch(context.Background(), opts, nil)
+	if err != nil || summary["succeeded"] != 3 || calls.Load() != 3 {
+		t.Fatalf("unrelated state blocked independent jobs: %v %v calls=%d", summary, err, calls.Load())
+	}
+	if _, err := RunBatch(context.Background(), opts, nil); err != nil || calls.Load() != 3 {
+		t.Fatalf("isolated jobs did not resume: %v calls=%d", err, calls.Load())
+	}
+}
+
 func TestSingleInvalidImageNotSubmitted(t *testing.T) {
 	var calls atomic.Int32
 	batchTestServer(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1) })

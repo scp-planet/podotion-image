@@ -1,6 +1,6 @@
 interface:
   display_name: "Podotion Image"
-  short_description: "v2.3.0 · Generate, edit, and batch Podotion images"
+  short_description: "v2.3.1 · Generate, edit, and batch Podotion images"
   default_prompt: "Use $podotion-image to generate an image from my description."
 
 policy:

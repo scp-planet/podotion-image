@@ -7,7 +7,7 @@ import (
 
 const (
 	SiteName              = "Podotion"
-	BinaryVersion         = "2.3.0"
+	BinaryVersion         = "2.3.1"
 	DefaultModel          = "gpt-image-2.5"
 	LegacyDefaultModel    = "gpt-image-2"
 	DirectProviderID      = "podotion-direct"

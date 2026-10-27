@@ -143,11 +143,13 @@ func runPreparedGeneration(ctx context.Context, prepared *preparedGeneration) (m
 	}
 	if !acquired {
 		var active *RequestRecord
-		records, _ := iterRequestRecords(outputDir, scopeValue)
-		for _, entry := range records {
-			if entry.Record.Fingerprint == fingerprint && (entry.Record.Status == "prepared" || entry.Record.Status == "submitted") {
-				active = entry.Record
-				break
+		if prepared.batchID == "" {
+			records, _ := iterRequestRecords(outputDir, scopeValue)
+			for _, entry := range records {
+				if entry.Record.Fingerprint == fingerprint && (entry.Record.Status == "prepared" || entry.Record.Status == "submitted") {
+					active = entry.Record
+					break
+				}
 			}
 		}
 		if active == nil {
@@ -190,37 +192,42 @@ func runPreparedGeneration(ctx context.Context, prepared *preparedGeneration) (m
 		}
 	}
 
-	records, err := iterRequestRecords(outputDir, scopeValue)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range records {
-		if entry.Path == recordPath || entry.Record.Fingerprint != fingerprint {
-			continue
+	// Batch fingerprints include the stable batch/job identity, so another key
+	// cannot be equivalent. Reading unrelated records would couple independent
+	// jobs and race with their atomic replacements on Windows.
+	if prepared.batchID == "" {
+		records, err := iterRequestRecords(outputDir, scopeValue)
+		if err != nil {
+			return nil, err
 		}
-		prior := entry.Record
-		if prior.Status == "submitted" {
-			prior.Status = "outcome_unknown"
-			prior.UpdatedAt = nowISO()
-			prior.MayHaveBeenBilled = true
-			_ = atomicWriteJSON(entry.Path, prior)
-		}
-		if prior.Status == "outcome_unknown" || prior.Status == "completed_unusable" {
-			return nil, requestStateError("an equivalent request may already have been charged; explicitly abandon it before creating another", "request_outcome_unknown", prior)
-		}
-		if prior.Status == "succeeded" && isRecentSuccess(prior) && !opts.ForceNew {
-			alias := *prior
-			alias.RequestKey = requestKey
-			alias.CreatedAt = nowISO()
-			alias.UpdatedAt = alias.CreatedAt
-			alias.UpstreamAttempts = 0
-			alias.MayHaveBeenBilled = false
-			alias.ReusedFrom = prior.RequestKey
-			if err := atomicWriteJSON(recordPath, &alias); err != nil {
-				return nil, err
+		for _, entry := range records {
+			if entry.Path == recordPath || entry.Record.Fingerprint != fingerprint {
+				continue
 			}
-			images, _ := recordSavedImages(&alias)
-			return generationResult(&alias, provider, endpoint, resolvedSize, inputImages, images, alias.Warnings, true, prior.RequestKey, alias.LastStatePath), nil
+			prior := entry.Record
+			if prior.Status == "submitted" {
+				prior.Status = "outcome_unknown"
+				prior.UpdatedAt = nowISO()
+				prior.MayHaveBeenBilled = true
+				_ = atomicWriteJSON(entry.Path, prior)
+			}
+			if prior.Status == "outcome_unknown" || prior.Status == "completed_unusable" {
+				return nil, requestStateError("an equivalent request may already have been charged; explicitly abandon it before creating another", "request_outcome_unknown", prior)
+			}
+			if prior.Status == "succeeded" && isRecentSuccess(prior) && !opts.ForceNew {
+				alias := *prior
+				alias.RequestKey = requestKey
+				alias.CreatedAt = nowISO()
+				alias.UpdatedAt = alias.CreatedAt
+				alias.UpstreamAttempts = 0
+				alias.MayHaveBeenBilled = false
+				alias.ReusedFrom = prior.RequestKey
+				if err := atomicWriteJSON(recordPath, &alias); err != nil {
+					return nil, err
+				}
+				images, _ := recordSavedImages(&alias)
+				return generationResult(&alias, provider, endpoint, resolvedSize, inputImages, images, alias.Warnings, true, prior.RequestKey, alias.LastStatePath), nil
+			}
 		}
 	}
 

@@ -1,4 +1,4 @@
-# Podotion Image v2.3.0
+# Podotion Image v2.3.1
 
 Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill。它使用 Go 原生 CLI 调用 Podotion Images API，支持生成、编辑、精确尺寸、请求恢复、双 SK 路由、诊断、更新、旧 Plugin 迁移和卸载。
 
@@ -318,6 +318,6 @@ C:\Users\scp-planet\.codex\podotion-image-regression\
 - `linux/amd64`
 - `linux/arm64`
 
-每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.3.0，保留 v2.2.0 发布。
+每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.3.1，保留 v2.2.0 和 v2.3.0 发布。v2.3.1 修复 Windows 并发作业扫描其他请求记录时的文件共享冲突，并补充确定性的文件占用回归测试；原有上传、格式和批次能力保持兼容。
 
-发布顺序：先将候选提交推送为 `v2.3.0` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade` 回归，确认旧启动器可升级且凭据和请求记录保留。
+发布顺序：先将候选提交推送为 `v2.3.1` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade --expected 2.3.1` 回归，确认旧启动器可升级且凭据和请求记录保留。

@@ -1,6 +1,6 @@
 ---
 name: podotion-image
-description: Podotion Image v2.3.0. Generate, edit, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
+description: Podotion Image v2.3.1. Generate, edit, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
 ---
 
 # Podotion Image
