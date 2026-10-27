@@ -28,6 +28,9 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Windows concurrent batch regression
+        if: runner.os == 'Windows'
+        run: go test ./internal/podotion -run '^TestBatch' -count=10 -timeout 3m
       - name: Race detector
         if: runner.os == 'Linux'
         run: go test -race ./...

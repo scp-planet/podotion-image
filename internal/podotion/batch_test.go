@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -76,17 +77,42 @@ func TestBatchTenConcurrentIdenticalVariantsResume(t *testing.T) {
 		}
 	})
 	opts, _ := batchOptions(t, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	releaseResponses := sync.OnceFunc(func() { close(release) })
 	type outcome struct {
 		result map[string]any
 		err    error
 	}
 	done := make(chan outcome, 1)
-	go func() { result, err := RunBatch(context.Background(), opts, nil); done <- outcome{result, err} }()
+	finished := make(chan struct{})
+	events := make(chan map[string]any, 10)
+	go func() {
+		defer close(finished)
+		result, err := RunBatch(ctx, opts, func(event map[string]any) error { events <- event; return nil })
+		done <- outcome{result, err}
+	}()
+	// Unblock and join workers before temporary-directory/server cleanup, even
+	// when a worker fails before reaching the synchronization barrier.
+	t.Cleanup(func() {
+		cancel()
+		releaseResponses()
+		receiveWithin(t, finished)
+	})
 	// No response is released until all ten requests are inside the handler.
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	for i := 0; i < 10; i++ {
-		receiveWithin(t, arrived)
+		select {
+		case <-arrived:
+		case event := <-events:
+			t.Fatalf("job completed before barrier: %v", event)
+		case completed := <-done:
+			t.Fatalf("batch ended before barrier: %v %v", completed.result, completed.err)
+		case <-timer.C:
+			t.Fatalf("only %d of 10 requests reached the barrier", calls.Load())
+		}
 	}
-	close(release)
+	releaseResponses()
 	completed := receiveWithin(t, done)
 	if completed.err != nil || completed.result["succeeded"] != 10 {
 		t.Fatalf("batch: %v %v", completed.result, completed.err)
@@ -149,17 +175,31 @@ func TestBatchCompletionOrderAndFailureIsolation(t *testing.T) {
 		successImage(w)
 	})
 	done := make(chan error, 1)
+	finished := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	releases := make([]func(), len(release))
+	for i := range release {
+		releases[i] = sync.OnceFunc(func() { close(release[i]) })
+	}
+	t.Cleanup(func() {
+		cancel()
+		for _, unblock := range releases {
+			unblock()
+		}
+		receiveWithin(t, finished)
+	})
 	var summary map[string]any
 	go func() {
+		defer close(finished)
 		var err error
-		summary, err = RunBatch(context.Background(), opts, func(event map[string]any) error { events <- event["index"].(int); return nil })
+		summary, err = RunBatch(ctx, opts, func(event map[string]any) error { events <- event["index"].(int); return nil })
 		done <- err
 	}()
 	for range manifest.Jobs {
 		receiveWithin(t, arrived)
 	}
 	for _, i := range []int{2, 1, 0} {
-		close(release[i])
+		releases[i]()
 		if got := receiveWithin(t, events); got != i+1 {
 			t.Fatalf("event order: %d", got)
 		}
@@ -295,13 +335,21 @@ func TestRequestKeyLockDifferentFingerprints(t *testing.T) {
 	release := make(chan struct{})
 	batchTestServer(t, func(w http.ResponseWriter, r *http.Request) { arrived <- struct{}{}; <-release; successImage(w) })
 	opts := GenerateOptions{Operation: "generate", Prompt: "first prompt", OutputDir: t.TempDir(), StateScope: "scope", RequestKey: "one-shared-request-key"}
+	ctx, cancel := context.WithCancel(context.Background())
+	unblock := sync.OnceFunc(func() { close(release) })
 	done := make(chan error, 1)
-	go func() { _, err := RunGeneration(context.Background(), opts); done <- err }()
+	finished := make(chan struct{})
+	t.Cleanup(func() { cancel(); unblock(); receiveWithin(t, finished) })
+	go func() {
+		defer close(finished)
+		_, err := RunGeneration(ctx, opts)
+		done <- err
+	}()
 	receiveWithin(t, arrived)
 	changed := opts
 	changed.Prompt = "different fingerprint"
 	_, err := RunGeneration(context.Background(), changed)
-	close(release)
+	unblock()
 	if err == nil || err.(*ProviderError).Kind != "request_in_progress" {
 		t.Fatalf("same key concurrently submitted: %v", err)
 	}
@@ -333,9 +381,14 @@ func TestBatchConcurrencyLimitAndFrozenInputs(t *testing.T) {
 	opts, _ := batchOptions(t, 5)
 	opts.Concurrency = 2
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
 	done := make(chan error, 1)
-	go func() { _, err := RunBatch(ctx, opts, nil); done <- err }()
+	finished := make(chan struct{})
+	t.Cleanup(func() { cancel(); close(release); receiveWithin(t, finished) })
+	go func() {
+		defer close(finished)
+		_, err := RunBatch(ctx, opts, nil)
+		done <- err
+	}()
 	for _, wave := range []int{2, 2, 1} {
 		for i := 0; i < wave; i++ {
 			receiveWithin(t, arrived)
