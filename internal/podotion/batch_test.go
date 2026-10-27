@@ -384,14 +384,28 @@ func TestBatchConcurrencyLimitAndFrozenInputs(t *testing.T) {
 	done := make(chan error, 1)
 	finished := make(chan struct{})
 	t.Cleanup(func() { cancel(); close(release); receiveWithin(t, finished) })
+	failures := make(chan map[string]any, 5)
 	go func() {
 		defer close(finished)
-		_, err := RunBatch(ctx, opts, nil)
+		_, err := RunBatch(ctx, opts, func(event map[string]any) error {
+			if event["result"].(map[string]any)["ok"] != true {
+				failures <- event
+			}
+			return nil
+		})
 		done <- err
 	}()
 	for _, wave := range []int{2, 2, 1} {
 		for i := 0; i < wave; i++ {
-			receiveWithin(t, arrived)
+			select {
+			case <-arrived:
+			case event := <-failures:
+				t.Fatalf("job failed before barrier: %v", event)
+			case err := <-done:
+				t.Fatalf("batch ended before barrier: %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatalf("concurrency barrier timed out with %d requests active", active.Load())
+			}
 		}
 		for i := 0; i < wave; i++ {
 			release <- struct{}{}
