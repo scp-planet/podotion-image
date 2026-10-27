@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/scp-planet/podotion-image/internal/podotion"
 )
 
 var testBinary string
@@ -94,7 +96,7 @@ func TestCLIVersionAndSizes(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["version"] != "2.2.0" || payload["default_model"] != "gpt-image-2.5" {
+	if payload["version"] != podotion.BinaryVersion || payload["default_model"] != "gpt-image-2.5" {
 		t.Fatalf("unexpected version payload: %v", payload)
 	}
 	stdout, stderr, code = runCLI(t, nil, "", "sizes")
@@ -272,7 +274,7 @@ func TestLauncherBootstrapChecksumAndCache(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("launcher failed: %s", errOutput)
 	}
-	if !strings.Contains(output, `"version": "2.2.0"`) {
+	if !strings.Contains(output, `"version": "`+podotion.BinaryVersion+`"`) {
 		t.Fatalf("unexpected launcher output: %s", output)
 	}
 	cacheBinary := launcherCachePath(codexHome)
@@ -289,6 +291,28 @@ func TestLauncherBootstrapChecksumAndCache(t *testing.T) {
 	}
 	if atomic.LoadInt32(&requests) != firstRequests {
 		t.Fatalf("cache hit performed a download")
+	}
+	// A new manifest version gets a separate cache; the old binary is preserved.
+	oldDigest, _ := fileSHA256(cacheBinary)
+	manifestPath := filepath.Join(skill, "runtime.json")
+	manifestRaw, _ := os.ReadFile(manifestPath)
+	var nextManifest map[string]any
+	json.Unmarshal(manifestRaw, &nextManifest)
+	nextManifest["version"] = "2.3.1-test"
+	nextManifest["tag"] = "v2.3.1-test"
+	manifestRaw, _ = json.Marshal(nextManifest)
+	os.WriteFile(manifestPath, manifestRaw, 0o600)
+	_, errOutput, code = runLauncher(t, skill, env, "version")
+	if code != 0 || atomic.LoadInt32(&requests) != firstRequests+2 {
+		t.Fatalf("version switch did not download separately: %s", errOutput)
+	}
+	currentDigest, _ := fileSHA256(cacheBinary)
+	if currentDigest != oldDigest {
+		t.Fatal("version switch modified previous cached binary")
+	}
+	nextBinary := filepath.Join(codexHome, "podotion-image", "runtime", "2.3.1-test", runtime.GOOS+"-"+runtime.GOARCH, filepath.Base(cacheBinary))
+	if _, err := os.Stat(nextBinary); err != nil {
+		t.Fatal("new version cache missing")
 	}
 
 	badServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -337,9 +361,9 @@ func makeLauncherSkill(t *testing.T, sourceBin, baseURL string) string {
 	}
 	manifest := map[string]any{
 		"schema":           1,
-		"version":          "2.2.0",
+		"version":          podotion.BinaryVersion,
 		"repository":       "scp-planet/podotion-image",
-		"tag":              "v2.2.0",
+		"tag":              "v" + podotion.BinaryVersion,
 		"release_base_url": baseURL,
 		"assets": map[string]string{
 			runtime.GOOS + "-" + runtime.GOARCH: asset,
@@ -384,7 +408,7 @@ func launcherCachePath(codexHome string) string {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	return filepath.Join(codexHome, "podotion-image", "runtime", "2.2.0", runtime.GOOS+"-"+runtime.GOARCH, name)
+	return filepath.Join(codexHome, "podotion-image", "runtime", podotion.BinaryVersion, runtime.GOOS+"-"+runtime.GOARCH, name)
 }
 
 func fileSHA256(path string) (string, error) {

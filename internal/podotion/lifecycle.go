@@ -420,7 +420,12 @@ func UpdateSkill(ctx context.Context, root, codexHome string, dryRun bool) (map[
 	if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(transaction)
+	cleanupTransaction := true
+	defer func() {
+		if cleanupTransaction {
+			_ = os.RemoveAll(transaction)
+		}
+	}()
 	if err := extractSkillArchive(archive, stage); err != nil {
 		return nil, err
 	}
@@ -451,25 +456,22 @@ func UpdateSkill(ctx context.Context, root, codexHome string, dryRun bool) (map[
 	}
 	restoreDirectory := leaveDirectory(target, codexHome)
 	defer restoreDirectory()
-	oldMoved := false
-	newInstalled := false
-	if err := os.Rename(target, backup); err != nil {
+	if err := moveSkillDirectory(target, backup); err != nil {
 		return nil, fmt.Errorf("Skill update could not move the previous installation: %w", err)
 	}
-	oldMoved = true
-	if err := os.Rename(stage, target); err != nil {
-		_ = os.Rename(backup, target)
-		oldMoved = false
+	if err := moveSkillDirectory(stage, target); err != nil {
+		if restoreErr := moveSkillDirectory(backup, target); restoreErr != nil {
+			cleanupTransaction = false
+			return nil, fmt.Errorf("Skill update and rollback failed; previous installation preserved at %s: %w", backup, restoreErr)
+		}
 		return nil, fmt.Errorf("Skill update failed; the previous installation was restored: %w", err)
-	}
-	newInstalled = true
-	if !oldMoved || !newInstalled {
-		return nil, fmt.Errorf("Skill update failed unexpectedly")
 	}
 	result := updateResult(target, oldDigest, newDigest, archiveDigest, false, true)
 	result["updated"] = true
 	return result, nil
 }
+
+var moveSkillDirectory = os.Rename
 
 func updateResult(target, oldDigest, newDigest string, archiveDigest [32]byte, dryRun, wouldUpdate bool) map[string]any {
 	result := map[string]any{

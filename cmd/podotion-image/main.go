@@ -54,6 +54,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runImageCommand(commandArgs, *credentialFile, *globalModel, "generate", stdin, stdout, stderr)
 	case "edit":
 		return runImageCommand(commandArgs, *credentialFile, *globalModel, "edit", stdin, stdout, stderr)
+	case "batch":
+		return runBatchCommand(commandArgs, *credentialFile, *globalModel, stdout, stderr)
 	case "doctor":
 		return runDoctor(commandArgs, *credentialFile, *globalModel, stdout, stderr)
 	case "sizes":
@@ -78,6 +80,48 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 type stringList []string
+
+func runBatchCommand(args []string, credentialFile, model string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("batch", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	input := fs.String("input-file", "", "UTF-8 batch manifest")
+	output := fs.String("output-dir", "", "absolute output directory")
+	scope := fs.String("state-scope", "", "stable task scope")
+	concurrency := fs.Int("concurrency", 0, "1-10 concurrent jobs; default all jobs")
+	credentials := fs.String("credential-file", credentialFile, "private provider.toml path")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printBatchUsage(stdout)
+			return 0
+		}
+		return emitError(stderr, err)
+	}
+	explicitConcurrency := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "concurrency" {
+			explicitConcurrency = true
+		}
+	})
+	if fs.NArg() != 0 || *input == "" || (explicitConcurrency && *concurrency < 1) {
+		return emitError(stderr, fmt.Errorf("batch requires --input-file and concurrency 1-10 when specified"))
+	}
+	encoder := json.NewEncoder(stdout)
+	summary, err := podotion.RunBatch(context.Background(), podotion.BatchOptions{InputFile: *input, OutputDir: *output, StateScope: *scope, Concurrency: *concurrency, CredentialFile: *credentials, Model: model}, func(event map[string]any) error { return encoder.Encode(event) })
+	if summary != nil {
+		if writeErr := encoder.Encode(summary); writeErr != nil {
+			return emitError(stderr, writeErr)
+		}
+		if err != nil {
+			return 1
+		}
+		return 0
+	}
+	return emitError(stderr, err)
+}
+
+func printBatchUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "podotion-image batch --input-file <manifest.json> --output-dir <absolute_dir> --state-scope <scope> [--concurrency 1-10]")
+}
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }
 func (s *stringList) Set(value string) error {
@@ -616,6 +660,7 @@ Usage:
 Commands:
   generate            Generate one image from a prompt
   edit                Edit one or more images
+  batch               Run 1-10 independent image jobs concurrently (JSON Lines)
   doctor              Check configuration and connectivity
   sizes               Print the supported size mapping
   config              Write credentials, check config, or set the default model

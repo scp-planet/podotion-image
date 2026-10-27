@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"hash/crc32"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,23 @@ func TestUpdateSkillTransaction(t *testing.T) {
 	codexHome := t.TempDir()
 	target := ExpectedSkillRoot(codexHome)
 	writeMinimalSkill(t, target, "old")
+	protected := map[string][]byte{
+		CredentialPath(codexHome): []byte("base_url = \"https://ai.podotion.com/v1\"\nmodel = \"custom-model\"\nPodotionImageSk = \"sk-private\"\n"),
+		filepath.Join(codexHome, "work", ".state", "scope", "requests", "legacy-request.json"): []byte(`{"version":1,"status":"outcome_unknown","request_key":"legacy-request"}`),
+	}
+	for path, data := range protected {
+		os.MkdirAll(filepath.Dir(path), 0o700)
+		os.WriteFile(path, data, 0o600)
+	}
+	assertProtected := func() {
+		t.Helper()
+		for path, want := range protected {
+			got, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("update changed credentials/model/request state: %s", path)
+			}
+		}
+	}
 	archive := makeStoredZip(archiveFiles("new"))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/zip")
@@ -129,6 +147,7 @@ func TestUpdateSkillTransaction(t *testing.T) {
 	if !strings.Contains(string(raw), "old") {
 		t.Fatalf("dry run modified the Skill")
 	}
+	assertProtected()
 
 	result, err := UpdateSkill(context.Background(), target, codexHome, false)
 	if err != nil {
@@ -141,6 +160,7 @@ func TestUpdateSkillTransaction(t *testing.T) {
 	if !strings.Contains(string(raw), "new") {
 		t.Fatalf("Skill was not updated: %s", raw)
 	}
+	assertProtected()
 	if _, err := os.Stat(filepath.Join(target, MetadataFilename)); err != nil {
 		t.Fatalf("metadata was not written: %v", err)
 	}
@@ -179,6 +199,43 @@ func TestUpdateRejectsIncompleteArchive(t *testing.T) {
 	raw, _ := os.ReadFile(filepath.Join(target, "SKILL.md"))
 	if !strings.Contains(string(raw), "old") {
 		t.Fatalf("failed update damaged the previous installation")
+	}
+}
+
+func TestUpdateRenameFailureRestoresOldInstallation(t *testing.T) {
+	for _, rollbackFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(rollbackFails), func(t *testing.T) {
+			codexHome := t.TempDir()
+			target := ExpectedSkillRoot(codexHome)
+			writeMinimalSkill(t, target, "old")
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(makeStoredZip(archiveFiles("new"))) }))
+			defer server.Close()
+			oldURL, oldClient, oldMove := repositoryArchiveURL, lifecycleHTTPClient, moveSkillDirectory
+			repositoryArchiveURL = server.URL
+			lifecycleHTTPClient = server.Client()
+			moveSkillDirectory = func(from, to string) error {
+				if strings.Contains(from, string(filepath.Separator)+"stage"+string(filepath.Separator)) || (rollbackFails && strings.Contains(from, string(filepath.Separator)+"backup"+string(filepath.Separator))) {
+					return fmt.Errorf("injected rename failure")
+				}
+				return os.Rename(from, to)
+			}
+			defer func() { repositoryArchiveURL = oldURL; lifecycleHTTPClient = oldClient; moveSkillDirectory = oldMove }()
+			_, err := UpdateSkill(context.Background(), target, codexHome, false)
+			if err == nil {
+				t.Fatal("expected replacement failure")
+			}
+			if !rollbackFails {
+				raw, err := os.ReadFile(filepath.Join(target, "SKILL.md"))
+				if err != nil || !strings.Contains(string(raw), "old") {
+					t.Fatal("rollback lost old installation")
+				}
+			} else {
+				backups, _ := filepath.Glob(filepath.Join(codexHome, TransactionDirectory, "*", "backup", SkillName, "SKILL.md"))
+				if len(backups) != 1 {
+					t.Fatal("failed rollback deleted recoverable backup")
+				}
+			}
+		})
 	}
 }
 

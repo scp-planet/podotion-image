@@ -8,12 +8,14 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var providerTransport http.RoundTripper
@@ -93,14 +95,22 @@ func BuildImagesGenerationPayload(model, prompt, size string) ([]byte, error) {
 }
 
 func BuildImagesEditMultipart(model, prompt string, imagePaths []string, size string) ([]byte, string, error) {
+	images, err := prepareInputImages(imagePaths)
+	if err != nil {
+		return nil, "", err
+	}
+	return buildPreparedEditMultipart(model, prompt, images, size)
+}
+
+func buildPreparedEditMultipart(model, prompt string, images []uploadImage, size string) ([]byte, string, error) {
 	normalizedPrompt, err := normalizePrompt(prompt)
 	if err != nil {
 		return nil, "", err
 	}
-	if len(imagePaths) == 0 {
+	if len(images) == 0 {
 		return nil, "", fmt.Errorf("edit operation requires at least one input image")
 	}
-	if len(imagePaths) > MaxInputImages {
+	if len(images) > MaxInputImages {
 		return nil, "", fmt.Errorf("at most %d input images are supported", MaxInputImages)
 	}
 	var body bytes.Buffer
@@ -121,26 +131,17 @@ func BuildImagesEditMultipart(model, prompt string, imagePaths []string, size st
 			return nil, "", err
 		}
 	}
-	for index, path := range imagePaths {
-		if err := ValidateInputFile(path); err != nil {
-			return nil, "", err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, "", fmt.Errorf("cannot read input image: %w", err)
-		}
-		mimeType, suffix, err := DetectImageType(data)
+	for index, input := range images {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image[]"; filename="image-%d%s"`, index+1, input.Suffix))
+		header.Set("Content-Type", input.MIME)
+		part, err := writer.CreatePart(header)
 		if err != nil {
 			return nil, "", err
 		}
-		part, err := writer.CreateFormFile("image[]", fmt.Sprintf("image-%d%s", index+1, suffix))
-		if err != nil {
+		if _, err := part.Write(input.Data); err != nil {
 			return nil, "", err
 		}
-		if _, err := part.Write(data); err != nil {
-			return nil, "", err
-		}
-		_ = mimeType
 	}
 	if err := writer.Close(); err != nil {
 		return nil, "", err
@@ -150,6 +151,9 @@ func BuildImagesEditMultipart(model, prompt string, imagePaths []string, size st
 
 func normalizePrompt(prompt string) (string, error) {
 	normalized := strings.TrimSpace(prompt)
+	if !utf8.ValidString(normalized) {
+		return "", fmt.Errorf("prompt must be valid UTF-8")
+	}
 	if normalized == "" {
 		return "", fmt.Errorf("prompt cannot be empty")
 	}

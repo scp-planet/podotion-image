@@ -1,6 +1,6 @@
 ---
 name: podotion-image
-description: Generate, draw, render, revise, or continue images through Podotion, and configure, diagnose, update, migrate from the legacy Plugin, or uninstall the Podotion Image Skill. Use for every requested Podotion image generation or edit, including references such as "edit the last image", and whenever the user asks to install, configure a default model, or manage this Skill. Do not trigger for text-only explanations about image models.
+description: Podotion Image v2.3.0. Generate, edit, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
 ---
 
 # Podotion Image
@@ -13,7 +13,7 @@ Resolve `<skill_dir>` as the directory containing this `SKILL.md`. Keep the acti
 
 - On native Windows, run `<skill_dir>\bin\podotion-image.cmd`.
 - On macOS, Linux, and WSL, run `sh <skill_dir>/bin/podotion-image.sh`.
-- Pass all commands and options through the launcher, for example `generate`, `edit`, `doctor`, `sizes`, `config`, `status`, `update`, `uninstall`, `request-status`, and `request-abandon`.
+- Pass all commands and options through the launcher, for example `generate`, `edit`, `batch`, `doctor`, `sizes`, `config`, `status`, `update`, `uninstall`, `request-status`, and `request-abandon`.
 
 On first use the launcher downloads the matching native binary from the fixed GitHub Releases location, verifies its SHA-256 checksum, and caches it under `$CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/`. Later runs reuse the cache. Do not install packages or runtimes. If the download fails, report the sanitized error and stop.
 
@@ -88,26 +88,53 @@ edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model 
 
 Each image action uses one upstream POST with a fixed 600-second timeout and no automatic HTTP retry. Allow the command to remain quiet for several minutes.
 
+Edits accept 1-5 explicit input images, each at most 20 MB and 50 million decoded pixels. Detect by content rather than filename. JPEG, PNG, and static WebP are validated and uploaded unchanged with their own MIME types. GIF is converted to PNG using only the first frame on its logical canvas, preserving transparency; BMP is converted to PNG; TIFF is converted to PNG using only its first page and available transparency. Converted files must also fit 20 MB. Report structured GIF/TIFF warnings. HEIC, AVIF, animated WebP, corrupt images, and decoder-unsupported variants fail locally before submission. Do not relabel bytes or bypass these checks with a direct HTTP request.
+
 Every invocation requests exactly one image with `n=1` and accepts exactly one final image from one known synchronous response container. Prefer the standard Images API `data[]`; when it is absent, null, or empty, accept the exact Responses-compatible `output[]` or `response.output[]` shape containing `type=image_generation_call` with absent status or `status=completed`. Never merge containers, recursively scan arbitrary wrappers, or consume partial-image fields. Never ask one invocation to return multiple images. If the selected container has zero or multiple final images, treat it as a completed-but-unusable protocol error and do not retry.
 
-When the user requests multiple images:
+## Concurrent batches
 
-- Require an explicit count from 1 through 10; ask for the count when it is missing, and ask the user to split requests above 10 into separate tasks.
+When the user requests multiple independent images, prepare all complete prompts first and invoke one batch command:
+
+```text
+batch --input-file <manifest.json> --output-dir <absolute_dir> --state-scope <scope> [--concurrency 1-10]
+```
+
+Write a UTF-8 manifest once, with stable IDs for recovery:
+
+```json
+{
+  "schema": 1,
+  "batch_id": "balcony-cats-001",
+  "jobs": [
+    {"job_id": "cat-a", "operation": "generate", "prompt": "Complete first prompt", "model": "gpt-image-2.5", "size": "2k", "ratio": "3:2"},
+    {"job_id": "cat-b", "operation": "generate", "prompt": "Complete second prompt", "size": "2k", "ratio": "3:2"}
+  ]
+}
+```
+
+Each job requires a unique `job_id`, `operation` (`generate` or `edit`), and complete `prompt`. Optional fields are `model`, `size`, `ratio`, and `images` (an array of explicit paths for edits). Relative image paths resolve against the manifest directory. Omitted model uses the configured default, frozen for this batch at its first run.
+
+- Require an explicit image count; ask for it when missing. A batch contains 1-10 jobs; split larger counts into batches.
 - Resolve all prompts, sizes, models, credentials, and output locations before the first billable call.
-- Run one complete image action at a time. Wait until its single image is decoded, atomically saved, and durably recorded before starting the next action. Never launch these actions in parallel.
-- Immediately present each successfully saved image and its absolute local file link before starting the next image action. Do not wait for the whole batch to finish before returning earlier results.
-- Reuse the task's `state_scope`, but assign each action a new `request_key`. Add `--force-new` to the second and later actions when their effective prompts and other inputs are identical.
-- Stop immediately after any failure, disconnect, unknown result, or completed-but-unusable result. Preserve earlier successful images, report the failed one-based position and sanitized status, and do not start the remaining actions.
+- Use one immutable manifest. Never let workers share a prompt file that can be overwritten. The CLI validates and snapshots the entire batch before any POST; one invalid job rejects the whole batch locally.
+- Default to all jobs concurrently. “全部同时生成” uses the default; “最多同时两张” uses `--concurrency 2`; “逐张生成” uses `--concurrency 1`.
+- Every job still sends one POST with `n=1`. Stable request keys derive from `batch_id` and `job_id`; distinct jobs with identical prompts create distinct variants without `--force-new`.
+- Consume stdout as JSON Lines. Each `job_completed` event contains the one-based `index`, `job_id`, and the usual `result`. Immediately present a successful image and its absolute link when its event arrives. The final `batch_completed` event lists jobs in manifest order; a nonzero exit may coexist with successful images.
+- A failure or unknown result affects its own job. Let other independent jobs complete; preserve all statuses and files. Never automatically abandon or retry a failed or uncertain job.
+- Resume with the same manifest, output directory, and scope. The CLI reuses successful results and frozen prompts, models, and input bytes. Do not change IDs to bypass an uncertain result; changing a manifest under the same `batch_id` is rejected.
+- Edits in a batch require explicit input images. An edit depending on an earlier result must be a subsequent step or batch after the input exists. Do not put forward references in `images`.
+- Each job has its own last-result state. The parent `last.json` is updated once in manifest order. If it contains multiple images and the user says “编辑上一张”, ask which image they mean, then pass its explicit `--image` path.
 
 ## Recovery
 
-After a disconnect or unknown result, run `request-status` with the same `request_key`, `state_scope`, and `output_dir`. Never start another billable request, including the next action in a multi-image sequence, while status is active, unknown, or completed-but-unusable.
+After a disconnect or unknown result, run `request-status` with the same `request_key`, `state_scope`, and `output_dir`. Never resend that job while its status is active, unknown, or completed-but-unusable. Other independent batch jobs may continue. Batch request keys are present in events and durable request records under the output directory.
 
 Use `request-abandon --acknowledge-possible-charge` only after the user explicitly acknowledges that the uncertain request may already have been billed.
 
 ## Deliver results
 
-Each successful result has exactly one item in `images[]`. For every successful image, including earlier images from a stopped multi-image sequence:
+Each successful job result has exactly one item in `images[]`. For every successful image, including images from a partially failed batch:
 
 1. Embed `images[].markdown_path` as a Markdown image in the final response.
 2. Add a separate absolute local file link to `images[].path`.

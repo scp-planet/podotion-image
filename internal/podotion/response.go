@@ -312,19 +312,26 @@ func SaveImageResults(ctx context.Context, results []ImageResult, outputDir stri
 	if err := os.MkdirAll(absoluteDir, 0o755); err != nil {
 		return nil, nil, fmt.Errorf("failed to create the output directory: %w", err)
 	}
-	stamp := time.Now().Format("20060102_150405_000000")
-	filename := stamp + suffix
-	destination := filepath.Join(absoluteDir, filename)
+	stamp := time.Now().Format("20060102_150405")
+	var filename, destination string
 	for attempt := 0; ; attempt++ {
-		if _, statErr := os.Stat(destination); os.IsNotExist(statErr) {
+		filename = stamp + "-" + RandomSuffix() + suffix
+		destination = filepath.Join(absoluteDir, filename)
+		reservation, reserveErr := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if reserveErr == nil {
+			reservation.Close()
 			break
 		}
-		if attempt >= 100 {
-			return nil, nil, fmt.Errorf("generated image destination already exists")
+		if !os.IsExist(reserveErr) || attempt >= 100 {
+			return nil, nil, fmt.Errorf("cannot reserve generated image destination: %w", reserveErr)
 		}
-		filename = stamp + "-" + RandomSuffix()[:8] + suffix
-		destination = filepath.Join(absoluteDir, filename)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(destination)
+		}
+	}()
 	temp, err := os.CreateTemp(absoluteDir, "."+filename+".*.tmp")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create a temporary image: %w", err)
@@ -346,6 +353,7 @@ func SaveImageResults(ctx context.Context, results []ImageResult, outputDir stri
 	if err := os.Rename(tempPath, destination); err != nil {
 		return nil, nil, fmt.Errorf("failed to atomically save the decoded image: %w", err)
 	}
+	committed = true
 	width, height := PNGDimensions(data)
 	image := NewSavedImage(destination, mimeType, int64(len(data)), width, height)
 	return []SavedImage{image}, nil, nil

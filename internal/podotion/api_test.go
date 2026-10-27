@@ -75,7 +75,7 @@ func TestPostImagesGenerateUsesModelAndRedactsErrors(t *testing.T) {
 
 func TestPostImagesEditMultipart(t *testing.T) {
 	imagePath := t.TempDir() + "/input.png"
-	if err := os.WriteFile(imagePath, fakePNG(100, 100), 0o600); err != nil {
+	if err := os.WriteFile(imagePath, encodedFixture(t, "png"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

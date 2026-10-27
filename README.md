@@ -1,4 +1,4 @@
-# Podotion Image
+# Podotion Image v2.3.0
 
 Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill。它使用 Go 原生 CLI 调用 Podotion Images API，支持生成、编辑、精确尺寸、请求恢复、双 SK 路由、诊断、更新、旧 Plugin 迁移和卸载。
 
@@ -17,6 +17,9 @@ $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 - **模型可配置**：支持 `provider.toml` 的 `model` 字段、单次 `--model` 覆盖和 `config set-model`；全新配置默认 `gpt-image-2.5`。
 - **原生更新**：`update` 直接通过 HTTPS 下载 GitHub ZIP，不再依赖 Git。
 - **轻量 Skill**：Skill 目录只保留 `SKILL.md`、`agents/openai.yaml`、`runtime.json` 和 `bin/` 启动器。
+- **上传修复**：每个 multipart 图片部分按真实内容设置 MIME 和后缀。
+- **六种输入格式**：JPEG、PNG、静态 WebP 原字节上传；GIF 首帧、BMP、TIFF 首页转换为 PNG。
+- **并发批次**：最多 10 个独立作业并发，提示词和输入先冻结，完成一项立即输出 JSONL 事件。
 
 ## 功能与取舍
 
@@ -29,7 +32,7 @@ $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 - 用户给出的合法精确像素尺寸会原样发送，不映射到最近档位。
 - 每次上游请求固定 `n=1`，从标准 `data[]` 或明确兼容的 `output[]`、`response.output[]` 中只接受一张最终结果；每个图片操作最多发送一次 POST，不自动重试，请求超时固定为 600 秒。
 - 只使用同步 Images API：生成调用 `POST /v1/images/generations`，编辑调用 `POST /v1/images/edits`；不调用 `/async`，不发送 `stream=true`，不轮询异步任务。
-- 多图请求由 Skill 最多串行执行 10 个独立图片操作，绝不并行；每生成并保存一张就立即返回该张结果。
+- 多图通过 `batch` 执行，每批 1-10 个独立作业，默认全部并发，可用 `--concurrency 1-10` 限制并发数；单项失败不阻断其他独立作业。
 - 图片保存在用户工作区，并在回复正文中提供 Markdown 预览和绝对文件链接。
 - `doctor` 只做配置和连通性检查，不计费；`doctor --image-probe` 会真实生图并可能计费。
 
@@ -172,6 +175,7 @@ status
 ```text
 podotion-image generate
 podotion-image edit
+podotion-image batch --input-file <manifest.json> --output-dir <absolute_dir> --state-scope <scope> [--concurrency N]
 podotion-image doctor [--image-probe]
 podotion-image sizes
 podotion-image config --check
@@ -197,7 +201,38 @@ generate --prompt "<prompt>" --request-key <key> [--model <name>] [--size <tier-
 edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
 ```
 
-成功结果包含 `ok`、`operation`、`model`、`credential_profile`、`request`、`images[]`、`warnings` 和 `state_path`。失败结果写入 stderr，只包含脱敏后的错误信息。
+成功结果包含 `ok`、`operation`、`model`、`credential_profile`、`request`、`images[]`、`warnings` 和 `state_path`。单图失败结果写入 stderr，只包含脱敏后的错误信息。批次的逐项结果和最终汇总写入 stdout，每行一个 JSON；预检失败写入 stderr。
+
+### 编辑输入格式
+
+| 真实格式 | 上传格式与处理 |
+| --- | --- |
+| JPEG / PNG / 静态 WebP | 完整解码验证后保留原字节，使用 `image/jpeg`、`image/png`、`image/webp` |
+| GIF | 按逻辑画布提取首帧并转 PNG，保留透明度，返回 `input_first_frame` 提示 |
+| BMP | 解码后转 PNG |
+| TIFF | 首页转 PNG，保留可解码的透明度，返回 `input_first_page` 提示 |
+
+按内容识别，忽略错误的扩展名。每次最多 5 张，每张转换前后均不超过 20 MB，解码不超过 5,000 万像素。HEIC、AVIF、动画 WebP、损坏文件与解码器不支持的变体会在提交前报错。输出图片识别保持原有协议。解码器使用固定版本的纯 Go `golang.org/x/image`，用户无需安装转换工具。
+
+### 并发批次与恢复
+
+```json
+{
+  "schema": 1,
+  "batch_id": "cats-001",
+  "jobs": [
+    {"job_id": "a", "operation": "generate", "prompt": "橘猫坐在阳台，写实照片", "size": "2k", "ratio": "3:2"},
+    {"job_id": "b", "operation": "generate", "prompt": "橘猫坐在阳台，写实照片", "model": "gpt-image-2.5", "size": "2k", "ratio": "3:2"},
+    {"job_id": "edit-a", "operation": "edit", "prompt": "将背景换成纯白", "images": ["input.jpg", "reference.png"]}
+  ]
+}
+```
+
+`batch_id`、`job_id` 使用 1-128 位字母、数字、点、下划线或短横线，首位为字母或数字。`job_id` 在批内唯一。编辑路径相对清单所在目录解析。先确定全部提示词，再写一次清单并运行 `batch`。同提示词的不同作业是独立变体；需要前一张结果的编辑应放到下一步。
+
+命令开始前会冻结默认模型、尺寸、提示词和输入快照，存入输出目录的 `.state/<scope>/batches/`，其中不含凭据。恢复时保持原清单、`batch_id`、`job_id`、输出目录和 scope。成功项复用，失败或未知项不会重发；独立项继续完成。变更同一批次的清单会被拒绝。快照包含提示词和参考图片，请按工作区资料保管。
+
+`job_completed` 行含 `index`、`job_id`、`result`，完成即输出；最后的 `batch_completed` 含按原顺序排列的 `jobs`、`succeeded`、`failed`。任一项失败时退出码非零，成功图片仍保留。父级 `last.json` 按清单顺序保存所有成功图片；存在多张时，`edit --last` 会要求选图。
 
 ## 状态、更新和卸载
 
@@ -249,6 +284,28 @@ go build ./cmd/podotion-image
 - GitHub ZIP 更新、更新失败保留旧版本、卸载保留凭据、旧 Plugin 迁移。
 - CLI 黑盒命令。
 - 首次下载、SHA-256 校验失败、缓存命中，以及无 Python 环境运行。
+- 各输入格式的真实解码、转换、透明度和 multipart 每部分 MIME / 文件名 / 字节 / 顺序，以及外层 boundary。
+- 无效输入零 POST、10 作业同步屏障并发、失败隔离、唯一文件名、请求键锁、冻结快照与安全恢复。
+
+CI 在 Windows、macOS、Linux 执行测试，Linux 额外执行 `go test -race ./...`，并继续交叉构建六平台静态产物。
+
+### 本机真实接口回归（不入 Git）
+
+专用 Go 工具、二进制、合成样例、私有 `provider.toml`、执行预算和 JSON / HTML 报告固定放在：
+
+```text
+C:\Users\scp-planet\.codex\podotion-image-regression\
+```
+
+运行入口（Windows）：
+
+```powershell
+& 'C:\Users\scp-planet\.codex\podotion-image-regression\regression.exe' run --binary '<repo>\dist\podotion-image-windows-amd64.exe'
+```
+
+默认模型 `gpt-image-2.5`，可用 `--model` 覆盖。先将独立测试 SK 写入工具目录的专用 `provider.toml`；不读取日常凭据。每次新运行建立隔离 workspace 和 `CODEX_HOME`。完整回归最多 5 个真实 POST：两张并发生图、JPEG 编辑、JPEG＋PNG＋WebP 编辑、GIF＋BMP＋TIFF 编辑。`resume --run <目录>` 沿用预算和请求身份；未知结果不换身份重试。工具检查文件可解码、数量及状态，不自动评判画面内容，也不会重发此前报告的证件照请求。
+
+发布后运行 `regression.exe upgrade`，在隔离环境实际安装 v2.2.0、执行旧启动器 `update --dry-run` 和 `update`，再检查新启动器下载、版本及缓存命中，并比较配置、模型及请求记录。升级验证不额外生图。后续可直接让 agent“运行 Podotion 本地回归”。
 
 ## 发布
 
@@ -261,4 +318,6 @@ go build ./cmd/podotion-image
 - `linux/amd64`
 - `linux/arm64`
 
-每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。发布新版本时，需要同步更新 `skills/podotion-image/runtime.json` 中的 `version` 和 `tag`，使其指向已发布的 GitHub Release。
+每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.3.0，保留 v2.2.0 发布。
+
+发布顺序：先将候选提交推送为 `v2.3.0` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade` 回归，确认旧启动器可升级且凭据和请求记录保留。

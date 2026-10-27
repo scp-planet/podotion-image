@@ -55,6 +55,8 @@ type RequestRecord struct {
 	Failure            map[string]any   `json:"failure,omitempty"`
 	LastStatePath      string           `json:"last_state_path,omitempty"`
 	ReusedFrom         string           `json:"reused_from_request_key,omitempty"`
+	BatchID            string           `json:"batch_id,omitempty"`
+	JobID              string           `json:"job_id,omitempty"`
 }
 
 type fileLock interface {
@@ -212,6 +214,10 @@ func RequestFingerprint(operation, endpoint, model, size, credentialProfile, out
 		}
 		imageMetadata = append(imageMetadata, InputImageMeta{SHA256: digest, Bytes: info.Size()})
 	}
+	return fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt, imageMetadata)
+}
+
+func fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt string, imageMetadata []InputImageMeta) (string, map[string]any, []InputImageMeta, error) {
 	metadata := map[string]any{
 		"fingerprint_version": 1,
 		"operation":           operation,
@@ -388,6 +394,14 @@ func AbandonRequest(outputDir, requestKey, scope string, acknowledged bool) (map
 	if err != nil {
 		return nil, err
 	}
+	keyLock, acquired, err := acquireRequestLock(requestLockPath(dir, "key-"+requestKey, scope))
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, requestStateError("request is still in progress and cannot be abandoned", "request_in_progress", nil)
+	}
+	defer keyLock.Release()
 	record, err := readRequestRecord(path)
 	if err != nil {
 		return nil, err

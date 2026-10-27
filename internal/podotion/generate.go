@@ -27,7 +27,28 @@ type GenerateOptions struct {
 var loadConfig = LoadConfig
 
 func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, error) {
-	started := time.Now()
+	prepared, err := prepareGeneration(opts, nil)
+	if err != nil {
+		return nil, err
+	}
+	return runPreparedGeneration(ctx, prepared)
+}
+
+type preparedGeneration struct {
+	opts        GenerateOptions
+	size        ResolvedSize
+	provider    ProviderConfig
+	endpoint    string
+	inputs      []uploadImage
+	metadata    []InputImageMeta
+	warnings    []map[string]any
+	fingerprint string
+	lastScope   string
+	batchID     string
+	jobID       string
+}
+
+func prepareGeneration(opts GenerateOptions, frozenConfig *ProviderConfig) (*preparedGeneration, error) {
 	resolvedSize, err := ResolveRequestSize(opts.Size, opts.Ratio)
 	if err != nil {
 		return nil, fmt.Errorf("%s", err)
@@ -36,9 +57,14 @@ func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, e
 	if err != nil {
 		return nil, err
 	}
-	config, err := loadConfig(opts.CredentialFile)
-	if err != nil {
-		return nil, err
+	var config ProviderConfig
+	if frozenConfig == nil {
+		config, err = loadConfig(opts.CredentialFile)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		config = *frozenConfig
 	}
 	model := ResolveModel(opts.Model, ModelSource{Model: config.Model})
 	model, err = ValidateModel(model)
@@ -67,17 +93,49 @@ func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, e
 	if err != nil {
 		return nil, err
 	}
-	fingerprint, _, imageMetadata, err := RequestFingerprint(
+	inputs := []uploadImage{}
+	imageMetadata := []InputImageMeta{}
+	warnings := []map[string]any{}
+	if opts.Operation == "edit" {
+		inputs, err = prepareInputImages(inputImages)
+		if err != nil {
+			return nil, err
+		}
+		for _, input := range inputs {
+			imageMetadata = append(imageMetadata, input.Original)
+			warnings = append(warnings, input.Warnings...)
+		}
+	}
+	fingerprint, _, _, err := fingerprintFromMetadata(
 		opts.Operation, endpoint, model, resolvedSize.Value, provider.CredentialProfile,
-		outputDir, scopeValue, prompt, inputImages,
+		outputDir, scopeValue, prompt, imageMetadata,
 	)
 	if err != nil {
 		return nil, err
 	}
+	opts.Prompt, opts.Model, opts.RequestKey = prompt, model, requestKey
+	opts.OutputDir, opts.StateScope, opts.InputImages = outputDir, scopeValue, inputImages
+	return &preparedGeneration{opts: opts, size: resolvedSize, provider: provider, endpoint: endpoint, inputs: inputs, metadata: imageMetadata, warnings: warnings, fingerprint: fingerprint, lastScope: scopeValue}, nil
+}
+
+func runPreparedGeneration(ctx context.Context, prepared *preparedGeneration) (map[string]any, error) {
+	started := time.Now()
+	opts := prepared.opts
+	provider, endpoint, resolvedSize := prepared.provider, prepared.endpoint, prepared.size
+	model, requestKey, outputDir, scopeValue := opts.Model, opts.RequestKey, opts.OutputDir, opts.StateScope
+	prompt, inputImages, fingerprint, imageMetadata := opts.Prompt, opts.InputImages, prepared.fingerprint, prepared.metadata
 	recordPath, err := requestRecordPath(outputDir, requestKey, scopeValue)
 	if err != nil {
 		return nil, err
 	}
+	keyLock, acquired, err := acquireRequestLock(requestLockPath(outputDir, "key-"+requestKey, scopeValue))
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, requestStateError("this request key is in progress; check its status instead of resubmitting", "request_in_progress", &RequestRecord{RequestKey: requestKey, Status: "request_in_progress", MayHaveBeenBilled: true})
+	}
+	defer keyLock.Release()
 	lockPath := requestLockPath(outputDir, fingerprint, scopeValue)
 	lock, acquired, err := acquireRequestLock(lockPath)
 	if err != nil {
@@ -166,7 +224,27 @@ func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, e
 		}
 	}
 
+	// Construct the complete body from immutable, validated bytes before marking
+	// the request submitted. Local input failures can never imply a paid call.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var body []byte
+	contentType := "application/json"
+	if opts.Operation == "edit" {
+		body, contentType, err = buildPreparedEditMultipart(model, prompt, prepared.inputs, resolvedSize.Value)
+	} else {
+		body, err = BuildImagesGenerationPayload(model, prompt, resolvedSize.Value)
+	}
+	if err != nil {
+		return nil, err
+	}
 	record := newRequestRecord(opts.Operation, requestKey, fingerprint, model, endpoint, resolvedSize.Value, provider.CredentialProfile, outputDir, scopeValue, prompt, imageMetadata, opts.ForceNew)
+	if prepared.batchID != "" {
+		record.FingerprintVersion = 2
+		record.BatchID = prepared.batchID
+		record.JobID = prepared.jobID
+	}
 	if err := atomicWriteJSON(recordPath, record); err != nil {
 		return nil, err
 	}
@@ -179,7 +257,7 @@ func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, e
 		return nil, err
 	}
 
-	response, err := PostImages(ctx, provider, opts.Operation, prompt, inputImages, resolvedSize.Value)
+	response, err := postProviderJSON(ctx, provider, endpoint, body, contentType, prompt)
 	if err != nil {
 		providerErr := asProviderError(err)
 		status := "outcome_unknown"
@@ -206,6 +284,7 @@ func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, e
 		var warnings []map[string]any
 		saved, warnings, err = SaveImageResults(ctx, results, outputDir, TimeoutSeconds*time.Second)
 		if err == nil {
+			warnings = append(warnings, prepared.warnings...)
 			warnings = append(warnings, ImageSizeWarnings(resolvedSize.Value, saved)...)
 			if warnings == nil {
 				warnings = []map[string]any{}
@@ -215,7 +294,7 @@ func RunGeneration(ctx context.Context, opts GenerateOptions) (map[string]any, e
 					saved[index].SHA256 = digest
 				}
 			}
-			stateFile, stateErr := WriteLastState(outputDir, saved, opts.Operation, model, resolvedSize.Value, scopeValue)
+			stateFile, stateErr := WriteLastState(outputDir, saved, opts.Operation, model, resolvedSize.Value, prepared.lastScope)
 			if stateErr != nil {
 				for _, image := range saved {
 					_ = os.Remove(image.Path)
