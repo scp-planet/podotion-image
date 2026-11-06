@@ -23,23 +23,6 @@ func ResolveOutputFormat(operation, value string) (string, error) {
 	if operation != "generate" && operation != "edit" {
 		return "", fmt.Errorf("operation must be generate or edit")
 	}
-	if operation == "edit" && format == "gif" {
-		method := "输出 GIF 动图"
-		return "", &ProviderError{
-			Kind:    "unsupported_edit_method",
-			Message: "官方未支持" + method + "的编辑方式。",
-			Details: map[string]any{
-				"code":                 "gif_edit_output_unsupported",
-				"operation":            operation,
-				"parameter":            "output_format",
-				"requested_format":     format,
-				"edit_method":          method,
-				"source":               "openai_docs",
-				"documentation_url":    "https://developers.openai.com/api/docs/guides/image-generation#generate-animated-gif-output",
-				"may_have_been_billed": false,
-			},
-		}
-	}
 	return format, nil
 }
 

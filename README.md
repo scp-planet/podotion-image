@@ -1,4 +1,4 @@
-# Podotion Image v2.4.0
+# Podotion Image v2.4.1
 
 All image generation defaults to `gpt-image-2.6` when no model is specified. An explicit `provider.toml` model or per-call model still wins, and installation does not rewrite existing configuration.
 
@@ -23,7 +23,7 @@ $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 - **六种输入格式**：JPEG、PNG、静态 WebP 原字节上传；GIF 首帧、BMP、TIFF 首页转换为 PNG。
 - **并发批次**：最多 10 个独立作业并发，提示词和输入先冻结，完成一项立即输出 JSONL 事件。
 - **可选输出格式**：默认 PNG；单次参数或批次作业可指定 JPG/JPEG、WebP、GIF，GIF 动画原字节保存。
-- **编辑能力限制**：按官方明确限制，在本地拒绝 GIF 输出编辑；结构化返回实际限制方式，批次预检失败时零 POST。
+- **GIF 兼容**：无参考图或带静态参考图都可以请求 GIF 输出；GIF 参考图只取逻辑画布首帧并转为 PNG，不保留动画。
 
 ## 功能与取舍
 
@@ -202,18 +202,18 @@ generate --prompt "<prompt>" --request-key <key> [--model <name>] [--output-form
 编辑示例：
 
 ```text
-edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--output-format png|jpg|jpeg|webp] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
+edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--output-format png|jpg|jpeg|webp|gif] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
 ```
 
 成功结果包含 `ok`、`operation`、`model`、`output_format`、`credential_profile`、`request`、`images[]`、`warnings` 和 `state_path`。单图失败结果写入 stderr，只包含脱敏后的错误信息。批次的逐项结果和最终汇总写入 stdout，每行一个 JSON；预检失败写入 stderr。
 
-### 输出格式与 GIF 限制
+### 输出格式与 GIF 兼容
 
 不指定格式时继续请求 PNG，不增加配置字段、不修改用户默认模型。`--output-format` 不区分大小写，接受 `png`、`jpg`、`jpeg`、`webp`、`gif`；`jpg` 发送为 API 的 `jpeg` 并保存为 `.jpg`。批次每项可独立使用 `output_format`，支持混合格式并发。
 
 自然语言“生成 JPG 图片”使用 `jpeg`，“生成 GIF 动图”使用 `gif` 并描述运动与循环。模型与 Podotion 是否支持该格式由上游决定，客户端不推断模型能力或偷偷换模型。官方 API 还要求所选模型具有 GIF preview 访问权限；模型列表包含某模型不代表已开通其全部能力。GIF 的帧数、时长使用上游默认值，不传流式、部分图片、压缩或提示词重写参数。
 
-官方图片生成指南明确说明 GIF 只支持生成、编辑端点不支持 GIF 输出；编辑参考的参数枚举与其存在冲突。本版本遵循明确限制。`edit --output-format gif` 在读输入、创建计费请求记录和联网前失败，返回 `error_kind=unsupported_edit_method`，`details` 包含 `code`、`parameter`、`requested_format`、`edit_method`、官方来源和 `may_have_been_billed=false`。用户提示统一取 `error.message`：“官方未支持输出 GIF 动图的编辑方式。”整段动画编辑同样走此限制；GIF 首帧作为静态参考仍可编辑。鉴权、额度和超时等错误不会改写成官方能力限制。
+GIF 输出同时适用于生成和编辑请求，最终能力由上游模型和凭据权限决定。静态 PNG、JPEG、WebP、BMP、TIFF 参考图可以请求 GIF 输出；GIF 输入只解码逻辑画布首帧并转为 PNG 后上传，因此不会伪装成动画编辑，也不会保留源 GIF 的帧序列。上游拒绝 GIF 时保留真实的脱敏错误，不把鉴权、额度、超时或模型能力错误改写成本地限制。
 
 官方依据（核对日期 2026-11-05）：
 
@@ -308,7 +308,7 @@ go build ./cmd/podotion-image
 - 首次下载、SHA-256 校验失败、缓存命中，以及无 Python 环境运行。
 - 各输入格式的真实解码、转换、透明度和 multipart 每部分 MIME / 文件名 / 字节 / 顺序，以及外层 boundary。
 - 无效输入零 POST、10 作业同步屏障并发、失败隔离、唯一文件名、请求键锁、冻结快照与安全恢复。
-- 多格式请求参数、GIF 动画字节和时序保留、真实 MIME 与扩展名、混合输出并发与恢复、格式指纹隔离、旧 PNG 状态兼容、GIF 编辑整批零 POST。
+- 多格式请求参数、GIF 动画字节和时序保留、真实 MIME 与扩展名、混合输出并发与恢复、格式指纹隔离、旧 PNG 状态兼容、GIF 生成与编辑兼容、GIF 参考图首帧转换。
 
 CI 在 Windows、macOS、Linux 执行测试，Linux 额外执行 `go test -race ./...`，并继续交叉构建六平台静态产物。
 
@@ -330,7 +330,7 @@ C:\Users\scp-planet\.codex\podotion-image-regression\
 
 发布后运行 `regression.exe upgrade`，在隔离环境实际安装 v2.2.0、执行旧启动器 `update --dry-run` 和 `update`，再检查新启动器下载、版本及缓存命中，并比较配置、模型及请求记录。升级验证不额外生图。后续可直接让 agent“运行 Podotion 本地回归”。
 
-v2.4 输出格式回归入口为同目录下的 `regression.exe formats --binary '<候选二进制>' --model gpt-image-2.6-flare`，同样最多 5 次请求：PNG、JPG、WebP、GIF 四项混合格式并发生成，以及一次混合参考图的 JPG 编辑。另做 GIF 编辑单张/批次本地拦截和成功请求恢复检查，不额外计费。GIF 验证全部帧可解码且至少两帧；服务端返回错误格式会明确记为验证未通过，不伪装成功。`formats --run <原运行目录>` 使用冻结的二进制、配置和原请求身份恢复，未知或失败请求不换标识重发。
+v2.4.1 输出格式回归入口为同目录下的 `regression.exe formats --binary '<候选二进制>' --model gpt-image-2.6-flare`，同样最多 5 次请求：PNG、JPG、WebP、GIF 四项混合格式并发生成，以及一次混合参考图的 JPG 编辑。GIF 回归同时覆盖无参考图生成、静态参考图编辑和 GIF 首帧参考图编辑；服务端返回错误格式会明确记为验证未通过，不伪装成功。`formats --run <原运行目录>` 使用冻结的二进制、配置和原请求身份恢复，未知或失败请求不换标识重发。
 
 ## 发布
 
@@ -343,6 +343,6 @@ v2.4 输出格式回归入口为同目录下的 `regression.exe formats --binary
 - `linux/amd64`
 - `linux/arm64`
 
-每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.4.0，保留 v2.2.0、v2.3.0 和 v2.3.1 发布。v2.3.1 的 Windows 并发状态隔离修复继续保留。
+每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.4.1，保留 v2.2.0、v2.3.0、v2.3.1 和 v2.4.0 发布。v2.3.1 的 Windows 并发状态隔离修复继续保留。
 
-发布顺序：先将候选提交推送为 `v2.4.0` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade --expected 2.4.0` 回归，确认旧启动器可升级且凭据和请求记录保留。
+发布顺序：先将候选提交推送为 `v2.4.1` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade --expected 2.4.1` 回归，确认旧启动器可升级且凭据和请求记录保留。

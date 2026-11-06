@@ -58,13 +58,8 @@ func TestResolveOutputFormat(t *testing.T) {
 			t.Fatalf("accepted unsupported output %q", invalid)
 		}
 	}
-	_, err := ResolveOutputFormat("edit", "GIF")
-	var restriction *ProviderError
-	if !errors.As(err, &restriction) || restriction.Kind != "unsupported_edit_method" || restriction.Attempts != 0 || restriction.Details["may_have_been_billed"] != false {
-		t.Fatalf("restriction: %v", err)
-	}
-	if restriction.Message != "官方未支持"+restriction.Details["edit_method"].(string)+"的编辑方式。" || restriction.Details["parameter"] != "output_format" || restriction.Details["requested_format"] != "gif" {
-		t.Fatalf("missing dynamic restriction: %v", restriction.AsMap())
+	if actual, err := ResolveOutputFormat("edit", "GIF"); err != nil || actual != "gif" {
+		t.Fatalf("edit GIF output should be accepted: %q %v", actual, err)
 	}
 }
 
@@ -84,12 +79,6 @@ func TestOutputFormatPayloadAndMultipart(t *testing.T) {
 		input := encodedFixture(t, "jpeg")
 		writeFixture(t, path, input)
 		body, contentType, err := BuildImagesEditMultipart("test-model", "prompt", []string{path}, "auto", format)
-		if format == "gif" {
-			if err == nil || len(body) != 0 {
-				t.Fatal("GIF editing must fail before building a body")
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,28 +209,27 @@ func TestFormatAwareReuseAndMismatch(t *testing.T) {
 	}
 }
 
-func TestFormatRestrictionPreflightZeroPosts(t *testing.T) {
+func TestGIFEditStillPreflightValidatesInputBeforePosts(t *testing.T) {
 	var calls atomic.Int32
 	batchTestServer(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); successImage(w) })
 	output := filepath.Join(t.TempDir(), "uncreated-output")
 	_, err := RunGeneration(context.Background(), GenerateOptions{Operation: "edit", OutputFormat: "gif", OutputDir: output, RequestKey: "restricted-gif-edit", Prompt: "edit", InputImages: []string{"missing.jpg"}})
-	var restriction *ProviderError
-	if !errors.As(err, &restriction) || restriction.Kind != "unsupported_edit_method" {
-		t.Fatalf("wrong error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "image file not found") {
+		t.Fatalf("missing GIF edit input was not rejected locally: %v", err)
 	}
 	if _, err := os.Stat(output); !os.IsNotExist(err) {
-		t.Fatal("restricted edit created output/state")
+		t.Fatal("invalid edit created output/state")
 	}
-	if _, err := PostImages(context.Background(), ProviderConfig{BaseURL: "https://example.com"}, "edit", "edit", []string{"missing"}, "auto", "gif"); !errors.As(err, &restriction) {
-		t.Fatalf("direct client bypassed restriction: %v", err)
+	if _, err := PostImages(context.Background(), ProviderConfig{BaseURL: "https://example.com"}, "edit", "edit", []string{"missing"}, "auto", "gif"); err == nil || !strings.Contains(err.Error(), "image file not found") {
+		t.Fatalf("direct GIF edit did not validate input: %v", err)
 	}
 	opts, manifest := batchOptions(t, 2)
 	manifest.Jobs[1].Operation, manifest.Jobs[1].OutputFormat = "edit", "GIF"
 	manifest.Jobs[1].Images = []string{"missing.jpg"}
 	writeBatchManifest(t, opts, manifest)
 	_, err = RunBatch(context.Background(), opts, nil)
-	if !errors.As(err, &restriction) || calls.Load() != 0 {
-		t.Fatalf("restricted batch sent paid calls: %v calls=%d", err, calls.Load())
+	if err == nil || !strings.Contains(err.Error(), "image file not found") || calls.Load() != 0 {
+		t.Fatalf("invalid GIF edit batch sent paid calls: %v calls=%d", err, calls.Load())
 	}
 	records, _ := iterRequestRecords(opts.OutputDir, opts.StateScope)
 	if len(records) != 0 {

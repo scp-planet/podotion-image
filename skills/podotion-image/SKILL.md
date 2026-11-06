@@ -1,6 +1,6 @@
 ---
 name: podotion-image
-description: Podotion Image v2.4.0. Generate PNG, JPG, WebP, or GIF images, edit still images, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
+description: Podotion Image v2.4.1. Generate or edit PNG, JPG, WebP, or GIF images, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
 ---
 
 # Podotion Image
@@ -82,7 +82,7 @@ Resolve the requested output format before composing the prompt. If omitted, lea
 
 GIF generation also requires access to the selected model's GIF preview. A model being listed does not prove this access is enabled. Report a provider's “not enabled” response as the actual upstream error, preserve its request state, and do not automatically try another model or endpoint.
 
-GIF output is generation-only. The official generation guide explicitly excludes GIF output from the edit endpoint, despite the edit reference's broader enum. For an edit requesting GIF output, including preserving or editing an entire animation, pass `--output-format gif` to the normal edit command so local preflight returns the structured restriction without a POST. Present `error.message` unchanged: “官方未支持<error.details.edit_method>的编辑方式。” Use the actual returned method, code, and parameter; never invent an official restriction from an authentication, quota, timeout, or Podotion-specific error. Do not work around a restriction by changing endpoints, silently selecting a different model, converting a still result into a fake animation, or relabeling bytes. GIF input used only as a static reference still follows the first-frame conversion below.
+GIF output is supported for both generation and edit requests when the selected upstream model and credential profile have GIF access. A request without a reference image uses `generate`; a request with a reference image uses `edit`, and both may pass `--output-format gif`. Do not locally reject a static PNG, JPEG, WebP, BMP, or TIFF reference that asks for GIF output. If the provider rejects GIF for the selected request, preserve and report the sanitized upstream error without trying another model or endpoint. Do not convert a still result into a fake animation or relabel bytes. If an input reference is a GIF, decode only its first frame on the logical canvas and upload that frame as PNG; do not claim to preserve or edit the source animation. Animated WebP remains unsupported.
 
 Before composing the prompt, read `sizes` when the user asks for a tier or ratio and the mapping is not already known. The CLI accepts `--size auto`, `1k`, `2k`, `4k`, or an exact `WIDTHxHEIGHT`, plus `--ratio` only when `--size` is a tier.
 
@@ -91,7 +91,7 @@ generate --prompt "<prompt>" --request-key <key> [--model <name>] [--output-form
 ```
 
 ```text
-edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--output-format png|jpg|jpeg|webp] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
+edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--output-format png|jpg|jpeg|webp|gif] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
 ```
 
 Each image action uses one upstream POST with a fixed 600-second timeout and no automatic HTTP retry. Allow the command to remain quiet for several minutes.
@@ -124,7 +124,7 @@ Write a UTF-8 manifest once, with stable IDs for recovery:
 Each job requires a unique `job_id`, `operation` (`generate` or `edit`), and complete `prompt`. Optional fields are `model`, `output_format`, `size`, `ratio`, and `images` (an array of explicit paths for edits). Each job can select its own output format; omitted format is PNG. A generation job with `output_format: "gif"` and no explicit `model` uses `gpt-image-2.6`; other jobs with an omitted model use the configured default. Explicit per-job or global model overrides always win, and the GIF default is not persisted. Relative image paths resolve against the manifest directory. Omitted model uses the configured default, frozen for this batch at its first run, except for the GIF generation rule above.
 
 - Require an explicit image count; ask for it when missing. A batch contains 1-10 jobs; split larger counts into batches.
-- Resolve all prompts, output formats, sizes, models, credentials, and output locations before the first billable call. A restricted GIF edit rejects the whole batch before any POST.
+- Resolve all prompts, output formats, sizes, models, credentials, and output locations before the first billable call. GIF output is valid for both generation and edit jobs; a GIF input is snapshotted and reduced to its first frame before submission.
 - Use one immutable manifest. Never let workers share a prompt file that can be overwritten. The CLI validates and snapshots the entire batch before any POST; one invalid job rejects the whole batch locally.
 - Default to all jobs concurrently. “全部同时生成” uses the default; “最多同时两张” uses `--concurrency 2`; “逐张生成” uses `--concurrency 1`.
 - Every job still sends one POST with `n=1`. Stable request keys derive from `batch_id` and `job_id`; distinct jobs with identical prompts create distinct variants without `--force-new`.

@@ -7,7 +7,7 @@ import (
 
 const (
 	SiteName              = "Podotion"
-	BinaryVersion         = "2.4.0"
+	BinaryVersion         = "2.4.1"
 	DefaultModel          = "gpt-image-2.6"
 	GIFDefaultModel       = "gpt-image-2.6"
 	LegacyDefaultModel    = "gpt-image-2.6"
