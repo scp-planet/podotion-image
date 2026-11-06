@@ -96,7 +96,7 @@ func TestCLIVersionAndSizes(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["version"] != podotion.BinaryVersion || payload["default_model"] != "gpt-image-2.5" {
+	if payload["version"] != podotion.BinaryVersion || payload["default_model"] != "gpt-image-2.6" {
 		t.Fatalf("unexpected version payload: %v", payload)
 	}
 	stdout, stderr, code = runCLI(t, nil, "", "sizes")
@@ -122,7 +122,7 @@ func TestCLIConfigAndModel(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["model"] != "gpt-image-2.5" {
+	if payload["model"] != "gpt-image-2.6" {
 		t.Fatalf("unexpected default model: %v", payload["model"])
 	}
 	_, stderr, code = runCLI(t, env, "", "config", "set-model", "vendor/image-3")
@@ -162,7 +162,7 @@ func TestCLIConfigPreservesExistingModel(t *testing.T) {
 		{
 			name:    "legacy config without model",
 			content: "base_url = \"https://ai.podotion.com/v1\"\nPodotionImageSk = \"sk-old\"\n",
-			want:    "gpt-image-2",
+			want:    "gpt-image-2.6",
 		},
 	}
 	for _, test := range tests {

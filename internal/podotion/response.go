@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"image"
 	"io"
 	"net"
 	"net/http"
@@ -211,7 +212,7 @@ func DecodeImageResult(ctx context.Context, result ImageResult, timeout time.Dur
 		if err != nil {
 			return nil, "", "", err
 		}
-		request.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,*/*")
+		request.Header.Set("Accept", "image/gif,image/webp,image/png,image/jpeg,*/*")
 		request.Header.Set("User-Agent", "podotion-image-skill/"+BinaryVersion)
 		client := newHTTPClient(timeout, func(request *http.Request, _ []*http.Request) error {
 			return validateDownloadURL(request.URL.String())
@@ -354,14 +355,18 @@ func SaveImageResults(ctx context.Context, results []ImageResult, outputDir stri
 		return nil, nil, fmt.Errorf("failed to atomically save the decoded image: %w", err)
 	}
 	committed = true
-	width, height := PNGDimensions(data)
+	width, height := ImageDimensions(data)
 	image := NewSavedImage(destination, mimeType, int64(len(data)), width, height)
 	return []SavedImage{image}, nil, nil
 }
 
-func PNGDimensions(data []byte) (*int, *int) {
+func ImageDimensions(data []byte) (*int, *int) {
 	if len(data) < 24 || !bytes.HasPrefix(data, []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}) {
-		return nil, nil
+		config, _, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil || config.Width <= 0 || config.Height <= 0 {
+			return nil, nil
+		}
+		return &config.Width, &config.Height
 	}
 	width := int(binary.BigEndian.Uint32(data[16:20]))
 	height := int(binary.BigEndian.Uint32(data[20:24]))

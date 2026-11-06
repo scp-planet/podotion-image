@@ -7,9 +7,10 @@ import (
 
 const (
 	SiteName              = "Podotion"
-	BinaryVersion         = "2.3.1"
-	DefaultModel          = "gpt-image-2.5"
-	LegacyDefaultModel    = "gpt-image-2"
+	BinaryVersion         = "2.4.0"
+	DefaultModel          = "gpt-image-2.6"
+	GIFDefaultModel       = "gpt-image-2.6"
+	LegacyDefaultModel    = "gpt-image-2.6"
 	DirectProviderID      = "podotion-direct"
 	DirectBaseURL         = "https://ai.podotion.com/v1"
 	DirectConfigDirectory = "podotion-image"
@@ -213,6 +214,7 @@ func (s SavedImage) AsMap() map[string]any {
 		"path":          s.Path,
 		"markdown_path": s.MarkdownPath,
 		"mime_type":     s.MimeType,
+		"output_format": imageOutputFormat(s.MimeType),
 		"bytes":         s.Bytes,
 		"width":         width,
 		"height":        height,

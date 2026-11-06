@@ -25,13 +25,14 @@ type BatchManifest struct {
 }
 
 type BatchJob struct {
-	JobID     string   `json:"job_id"`
-	Operation string   `json:"operation"`
-	Prompt    string   `json:"prompt"`
-	Model     string   `json:"model,omitempty"`
-	Size      string   `json:"size,omitempty"`
-	Ratio     string   `json:"ratio,omitempty"`
-	Images    []string `json:"images,omitempty"`
+	JobID        string   `json:"job_id"`
+	Operation    string   `json:"operation"`
+	Prompt       string   `json:"prompt"`
+	Model        string   `json:"model,omitempty"`
+	OutputFormat string   `json:"output_format,omitempty"`
+	Size         string   `json:"size,omitempty"`
+	Ratio        string   `json:"ratio,omitempty"`
+	Images       []string `json:"images,omitempty"`
 }
 
 type BatchOptions struct {
@@ -57,6 +58,7 @@ type frozenJob struct {
 	Operation     string           `json:"operation"`
 	Prompt        string           `json:"prompt"`
 	Model         string           `json:"model"`
+	OutputFormat  string           `json:"output_format,omitempty"`
 	Size          ResolvedSize     `json:"size"`
 	RequestKey    string           `json:"request_key"`
 	Fingerprint   string           `json:"fingerprint"`
@@ -233,7 +235,7 @@ func RunBatch(ctx context.Context, opts BatchOptions, emit func(map[string]any) 
 	}
 	stateFile := ""
 	if len(allImages) > 0 {
-		stateFile, err = WriteLastState(outputDir, allImages, "batch", "", "", scope)
+		stateFile, err = WriteLastState(outputDir, allImages, "batch", "", "", scope, "")
 	}
 	summary := map[string]any{"event": "batch_completed", "schema": 1, "ok": failed == 0 && err == nil && streamErr == nil, "operation": "batch", "batch_id": manifest.BatchID, "jobs": ordered, "succeeded": succeeded, "failed": failed, "state_path": nilIfEmpty(stateFile), "snapshot_path": filepath.Join(dir, "snapshot.json")}
 	if err != nil {
@@ -275,7 +277,7 @@ func prepareBatch(manifest BatchManifest, manifestHash, dir, outputDir, scope, o
 		if model == "" {
 			model = overrideModel
 		}
-		p, err := prepareGeneration(GenerateOptions{Operation: job.Operation, Prompt: job.Prompt, Model: model, Size: job.Size, Ratio: job.Ratio, InputImages: job.Images, OutputDir: outputDir, StateScope: scope, RequestKey: batchJobKey(manifest.BatchID, job.JobID)}, &config)
+		p, err := prepareGeneration(GenerateOptions{Operation: job.Operation, Prompt: job.Prompt, Model: model, OutputFormat: job.OutputFormat, Size: job.Size, Ratio: job.Ratio, InputImages: job.Images, OutputDir: outputDir, StateScope: scope, RequestKey: batchJobKey(manifest.BatchID, job.JobID)}, &config)
 		if err != nil {
 			return nil, fmt.Errorf("job %s preflight: %w", job.JobID, err)
 		}
@@ -291,7 +293,7 @@ func prepareBatch(manifest BatchManifest, manifestHash, dir, outputDir, scope, o
 	}
 	snapshot := batchSnapshot{Schema: 1, BatchID: manifest.BatchID, ManifestSHA256: manifestHash}
 	for i, p := range prepared {
-		frozen := frozenJob{JobID: manifest.Jobs[i].JobID, Operation: p.opts.Operation, Prompt: p.opts.Prompt, Model: p.opts.Model, Size: p.size, RequestKey: p.opts.RequestKey, Fingerprint: p.fingerprint, OriginalPaths: p.opts.InputImages, Warnings: p.warnings}
+		frozen := frozenJob{JobID: manifest.Jobs[i].JobID, Operation: p.opts.Operation, Prompt: p.opts.Prompt, Model: p.opts.Model, OutputFormat: p.opts.OutputFormat, Size: p.size, RequestKey: p.opts.RequestKey, Fingerprint: p.fingerprint, OriginalPaths: p.opts.InputImages, Warnings: p.warnings}
 		for j, input := range p.inputs {
 			name := fmt.Sprintf("job-%02d-image-%02d%s", i+1, j+1, input.Suffix)
 			if err := writeSnapshotBytes(filepath.Join(dir, name), input.Data); err != nil {
@@ -313,6 +315,10 @@ func restoreBatch(snapshot batchSnapshot, dir, outputDir, scope string, config P
 		if job.RequestKey != batchJobKey(snapshot.BatchID, job.JobID) {
 			return nil, fmt.Errorf("invalid batch snapshot job identity")
 		}
+		format, err := ResolveOutputFormat(job.Operation, job.OutputFormat)
+		if err != nil {
+			return nil, fmt.Errorf("job %s preflight: %w", job.JobID, err)
+		}
 		config.Model = job.Model
 		provider, err := config.SelectCredential(job.Size.CredentialProfile())
 		if err != nil {
@@ -322,7 +328,7 @@ func restoreBatch(snapshot batchSnapshot, dir, outputDir, scope string, config P
 		if err != nil {
 			return nil, err
 		}
-		p := &preparedGeneration{opts: GenerateOptions{Operation: job.Operation, Prompt: job.Prompt, Model: job.Model, Size: job.Size.Value, OutputDir: outputDir, StateScope: scope, RequestKey: job.RequestKey, InputImages: job.OriginalPaths}, size: job.Size, provider: provider, endpoint: endpoint, fingerprint: job.Fingerprint, warnings: job.Warnings, lastScope: SafeThreadID(scope + ".job." + job.RequestKey)}
+		p := &preparedGeneration{opts: GenerateOptions{Operation: job.Operation, Prompt: job.Prompt, Model: job.Model, OutputFormat: format, Size: job.Size.Value, OutputDir: outputDir, StateScope: scope, RequestKey: job.RequestKey, InputImages: job.OriginalPaths}, size: job.Size, provider: provider, endpoint: endpoint, fingerprint: job.Fingerprint, warnings: job.Warnings, lastScope: SafeThreadID(scope + ".job." + job.RequestKey)}
 		p.batchID, p.jobID = snapshot.BatchID, job.JobID
 		p.metadata = []InputImageMeta{}
 		for _, input := range job.Inputs {
@@ -345,7 +351,7 @@ func restoreBatch(snapshot batchSnapshot, dir, outputDir, scope string, config P
 			p.inputs = append(p.inputs, uploadImage{Data: data, MIME: input.MIME, Suffix: input.Suffix, Original: input.Original})
 			p.metadata = append(p.metadata, input.Original)
 		}
-		fingerprint, _, _, err := fingerprintFromMetadata(job.Operation, endpoint, job.Model, job.Size.Value, provider.CredentialProfile, outputDir, scope, job.Prompt, p.metadata)
+		fingerprint, _, _, err := fingerprintFromMetadata(job.Operation, endpoint, job.Model, job.Size.Value, provider.CredentialProfile, outputDir, scope, job.Prompt, p.metadata, format)
 		if err != nil || digestText("batch-v1\x00"+job.RequestKey+"\x00"+fingerprint) != job.Fingerprint {
 			return nil, fmt.Errorf("batch snapshot options changed; do not resubmit")
 		}

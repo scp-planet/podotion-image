@@ -78,7 +78,11 @@ func BuildModelsURL(baseURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func BuildImagesGenerationPayload(model, prompt, size string) ([]byte, error) {
+func BuildImagesGenerationPayload(model, prompt, size, outputFormat string) ([]byte, error) {
+	format, err := ResolveOutputFormat("generate", outputFormat)
+	if err != nil {
+		return nil, err
+	}
 	normalizedPrompt, err := normalizePrompt(prompt)
 	if err != nil {
 		return nil, err
@@ -88,21 +92,28 @@ func BuildImagesGenerationPayload(model, prompt, size string) ([]byte, error) {
 		"prompt":        normalizedPrompt,
 		"size":          size,
 		"quality":       Quality,
-		"output_format": "png",
+		"output_format": format,
 		"n":             1,
 	}
 	return json.Marshal(payload)
 }
 
-func BuildImagesEditMultipart(model, prompt string, imagePaths []string, size string) ([]byte, string, error) {
+func BuildImagesEditMultipart(model, prompt string, imagePaths []string, size, outputFormat string) ([]byte, string, error) {
+	if _, err := ResolveOutputFormat("edit", outputFormat); err != nil {
+		return nil, "", err
+	}
 	images, err := prepareInputImages(imagePaths)
 	if err != nil {
 		return nil, "", err
 	}
-	return buildPreparedEditMultipart(model, prompt, images, size)
+	return buildPreparedEditMultipart(model, prompt, images, size, outputFormat)
 }
 
-func buildPreparedEditMultipart(model, prompt string, images []uploadImage, size string) ([]byte, string, error) {
+func buildPreparedEditMultipart(model, prompt string, images []uploadImage, size, outputFormat string) ([]byte, string, error) {
+	format, err := ResolveOutputFormat("edit", outputFormat)
+	if err != nil {
+		return nil, "", err
+	}
 	normalizedPrompt, err := normalizePrompt(prompt)
 	if err != nil {
 		return nil, "", err
@@ -123,7 +134,7 @@ func buildPreparedEditMultipart(model, prompt string, images []uploadImage, size
 		{"prompt", normalizedPrompt},
 		{"size", size},
 		{"quality", Quality},
-		{"output_format", "png"},
+		{"output_format", format},
 		{"n", "1"},
 	}
 	for _, field := range fields {
@@ -199,7 +210,7 @@ func DetectImageType(data []byte) (string, string, error) {
 	return "", "", fmt.Errorf("image data had an unsupported or invalid file signature")
 }
 
-func PostImages(ctx context.Context, provider ProviderConfig, operation, prompt string, imagePaths []string, size string) (map[string]any, error) {
+func PostImages(ctx context.Context, provider ProviderConfig, operation, prompt string, imagePaths []string, size, outputFormat string) (map[string]any, error) {
 	var body []byte
 	var contentType string
 	var err error
@@ -207,13 +218,13 @@ func PostImages(ctx context.Context, provider ProviderConfig, operation, prompt 
 		if len(imagePaths) > 0 {
 			return nil, fmt.Errorf("generate operation does not accept input images")
 		}
-		body, err = BuildImagesGenerationPayload(provider.Model, prompt, size)
+		body, err = BuildImagesGenerationPayload(provider.Model, prompt, size, outputFormat)
 		if err != nil {
 			return nil, err
 		}
 		contentType = "application/json"
 	} else if operation == "edit" {
-		body, contentType, err = BuildImagesEditMultipart(provider.Model, prompt, imagePaths, size)
+		body, contentType, err = BuildImagesEditMultipart(provider.Model, prompt, imagePaths, size, outputFormat)
 		if err != nil {
 			return nil, err
 		}

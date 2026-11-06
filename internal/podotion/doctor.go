@@ -121,7 +121,7 @@ func runImageProbe(ctx context.Context, provider ProviderConfig, model, outputDi
 		return capability
 	}
 	provider.Model = model
-	response, err := PostImages(ctx, provider, "generate", "Generate a plain light gray square with no text.", nil, size.Value)
+	response, err := PostImages(ctx, provider, "generate", "Generate a plain light gray square with no text.", nil, size.Value, DefaultOutputFormat)
 	if err != nil {
 		capability["error"] = asProviderError(err).AsMap()
 		return capability

@@ -238,6 +238,19 @@ func ResolveModel(explicit string, config ModelSource) string {
 	return DefaultModel
 }
 
+func ResolveRequestModel(operation, outputFormat, explicit string, config ModelSource) string {
+	if strings.TrimSpace(explicit) != "" {
+		return strings.TrimSpace(explicit)
+	}
+	if strings.TrimSpace(config.Model) != "" {
+		return strings.TrimSpace(config.Model)
+	}
+	if operation == "generate" && strings.EqualFold(strings.TrimSpace(outputFormat), "gif") {
+		return GIFDefaultModel
+	}
+	return DefaultModel
+}
+
 type ModelSource struct {
 	Model string
 }

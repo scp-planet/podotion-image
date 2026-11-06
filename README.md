@@ -1,4 +1,6 @@
-# Podotion Image v2.3.1
+# Podotion Image v2.4.0
+
+All image generation defaults to `gpt-image-2.6` when no model is specified. An explicit `provider.toml` model or per-call model still wins, and installation does not rewrite existing configuration.
 
 Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill。它使用 Go 原生 CLI 调用 Podotion Images API，支持生成、编辑、精确尺寸、请求恢复、双 SK 路由、诊断、更新、旧 Plugin 迁移和卸载。
 
@@ -8,26 +10,28 @@ Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill�
 $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 ```
 
-生图模型可配置。全新配置默认使用 `gpt-image-2.5`；已有配置不会被安装或更新流程修改。
+生图模型可配置。全新配置默认使用 `gpt-image-2.6`；已有配置不会被安装或更新流程修改。
 
 ## 主要变化
 
 - **去 Python 化**：正式运行路径不再包含 Python 脚本，也不要求用户安装解释器。
 - **原生 CLI**：Windows、macOS、Linux 的 amd64 与 arm64 均提供 `CGO_ENABLED=0` 静态二进制。
-- **模型可配置**：支持 `provider.toml` 的 `model` 字段、单次 `--model` 覆盖和 `config set-model`；全新配置默认 `gpt-image-2.5`。
+- **模型可配置**：支持 `provider.toml` 的 `model` 字段、单次 `--model` 覆盖和 `config set-model`；全新配置默认 `gpt-image-2.6`。
 - **原生更新**：`update` 直接通过 HTTPS 下载 GitHub ZIP，不再依赖 Git。
 - **轻量 Skill**：Skill 目录只保留 `SKILL.md`、`agents/openai.yaml`、`runtime.json` 和 `bin/` 启动器。
 - **上传修复**：每个 multipart 图片部分按真实内容设置 MIME 和后缀。
 - **六种输入格式**：JPEG、PNG、静态 WebP 原字节上传；GIF 首帧、BMP、TIFF 首页转换为 PNG。
 - **并发批次**：最多 10 个独立作业并发，提示词和输入先冻结，完成一项立即输出 JSONL 事件。
+- **可选输出格式**：默认 PNG；单次参数或批次作业可指定 JPG/JPEG、WebP、GIF，GIF 动画原字节保存。
+- **编辑能力限制**：按官方明确限制，在本地拒绝 GIF 输出编辑；结构化返回实际限制方式，批次预检失败时零 POST。
 
 ## 功能与取舍
 
 - `auto`、1K、2K 和未达到 4K 标准的精确尺寸使用 `PodotionImageSk`。
 - 显式 4K 档、规范 4K 档尺寸或总像素达到 8,294,400 时使用 `PodotionImage4kSk`。
 - 旧单 SK 配置继续支持非 4K 请求；4K SK 缺失时在联网和写请求状态前失败，不回退默认 SK。
-- 旧 `provider.toml` 没有 `model` 字段时继续使用 `gpt-image-2`，升级不会改变现有用户行为。
-- 模型优先级固定为：`--model` > `provider.toml` 的 `model` > 新配置默认 `gpt-image-2.5`（旧配置缺省为 `gpt-image-2`）。
+- 旧 `provider.toml` 没有 `model` 字段时也使用 `gpt-image-2.6`；安装或更新不会改写用户配置。
+- 模型优先级固定为：`--model` > `provider.toml` 的 `model` > 默认 `gpt-image-2.6`。
 - 不根据模型名自动推断能力；尺寸、4K 和双 SK 规则保持不变。未知模型由上游报错。
 - 用户给出的合法精确像素尺寸会原样发送，不映射到最近档位。
 - 每次上游请求固定 `n=1`，从标准 `data[]` 或明确兼容的 `output[]`、`response.output[]` 中只接受一张最终结果；每个图片操作最多发送一次 POST，不自动重试，请求超时固定为 600 秒。
@@ -36,7 +40,7 @@ $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 - 图片保存在用户工作区，并在回复正文中提供 Markdown 预览和绝对文件链接。
 - `doctor` 只做配置和连通性检查，不计费；`doctor --image-probe` 会真实生图并可能计费。
 
-Skill 不提供 MCP `image`、`resource_link`、`resources/list`、`resources/read`、`publish_existing_image` 或 Codex Outputs 面板登记。PNG、正文预览和本地文件链接仍然保留。
+Skill 不提供 MCP `image`、`resource_link`、`resources/list`、`resources/read`、`publish_existing_image` 或 Codex Outputs 面板登记。图片正文预览和本地文件链接仍然保留。
 
 ## 安装与首次运行
 
@@ -64,12 +68,12 @@ $CODEX_HOME/podotion-image/provider.toml
 
 ```toml
 base_url = "https://ai.podotion.com/v1"
-model = "gpt-image-2.5"
+model = "gpt-image-2.6"
 PodotionImageSk = "sk-..."
 PodotionImage4kSk = "sk-..."
 ```
 
-`model` 和 `PodotionImage4kSk` 都是可选项。新建配置时 `model` 默认为 `gpt-image-2.5`；已有配置缺少 `model` 时仍按 `gpt-image-2` 解释。Skill 安装或更新不会改写 `provider.toml`。`base_url` 固定为 `https://ai.podotion.com/v1`。
+`model` 和 `PodotionImage4kSk` 都是可选项。新建配置时 `model` 默认为 `gpt-image-2.6`；已有配置缺少 `model` 时也按 `gpt-image-2.6` 解释。Skill 安装或更新不会改写 `provider.toml`。`base_url` 固定为 `https://ai.podotion.com/v1`。
 
 ### 写入凭据
 
@@ -192,16 +196,34 @@ podotion-image request-abandon
 生成示例：
 
 ```text
-generate --prompt "<prompt>" --request-key <key> [--model <name>] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
+generate --prompt "<prompt>" --request-key <key> [--model <name>] [--output-format png|jpg|jpeg|webp|gif] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
 ```
 
 编辑示例：
 
 ```text
-edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
+edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model <name>] [--output-format png|jpg|jpeg|webp] [--size <tier-or-WIDTHxHEIGHT>] [--ratio <ratio>] --output-dir <absolute_dir> --state-scope <scope> [--force-new]
 ```
 
-成功结果包含 `ok`、`operation`、`model`、`credential_profile`、`request`、`images[]`、`warnings` 和 `state_path`。单图失败结果写入 stderr，只包含脱敏后的错误信息。批次的逐项结果和最终汇总写入 stdout，每行一个 JSON；预检失败写入 stderr。
+成功结果包含 `ok`、`operation`、`model`、`output_format`、`credential_profile`、`request`、`images[]`、`warnings` 和 `state_path`。单图失败结果写入 stderr，只包含脱敏后的错误信息。批次的逐项结果和最终汇总写入 stdout，每行一个 JSON；预检失败写入 stderr。
+
+### 输出格式与 GIF 限制
+
+不指定格式时继续请求 PNG，不增加配置字段、不修改用户默认模型。`--output-format` 不区分大小写，接受 `png`、`jpg`、`jpeg`、`webp`、`gif`；`jpg` 发送为 API 的 `jpeg` 并保存为 `.jpg`。批次每项可独立使用 `output_format`，支持混合格式并发。
+
+自然语言“生成 JPG 图片”使用 `jpeg`，“生成 GIF 动图”使用 `gif` 并描述运动与循环。模型与 Podotion 是否支持该格式由上游决定，客户端不推断模型能力或偷偷换模型。官方 API 还要求所选模型具有 GIF preview 访问权限；模型列表包含某模型不代表已开通其全部能力。GIF 的帧数、时长使用上游默认值，不传流式、部分图片、压缩或提示词重写参数。
+
+官方图片生成指南明确说明 GIF 只支持生成、编辑端点不支持 GIF 输出；编辑参考的参数枚举与其存在冲突。本版本遵循明确限制。`edit --output-format gif` 在读输入、创建计费请求记录和联网前失败，返回 `error_kind=unsupported_edit_method`，`details` 包含 `code`、`parameter`、`requested_format`、`edit_method`、官方来源和 `may_have_been_billed=false`。用户提示统一取 `error.message`：“官方未支持输出 GIF 动图的编辑方式。”整段动画编辑同样走此限制；GIF 首帧作为静态参考仍可编辑。鉴权、额度和超时等错误不会改写成官方能力限制。
+
+官方依据（核对日期 2026-11-05）：
+
+```text
+https://developers.openai.com/api/docs/guides/image-generation#generate-animated-gif-output
+https://developers.openai.com/api/reference/resources/images/methods/generate
+https://developers.openai.com/api/reference/resources/images/methods/edit
+```
+
+输出按真实内容确定 MIME 和扩展名，GIF 的帧、帧延迟、透明度和循环信息原样保留，绝不走输入首帧转换。顶层与 `request.output_format` 是请求格式，`images[].output_format` 是实际格式；不一致时保留实际文件并返回 `image_format_mismatch` 提示，不改后缀伪装，不自动重试。JPEG、GIF、WebP 同样报告可解析尺寸。旧请求与旧批次快照缺少格式时继续视作 PNG，保留旧 PNG 指纹；不同格式不复用结果。
 
 ### 编辑输入格式
 
@@ -222,7 +244,7 @@ edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model 
   "batch_id": "cats-001",
   "jobs": [
     {"job_id": "a", "operation": "generate", "prompt": "橘猫坐在阳台，写实照片", "size": "2k", "ratio": "3:2"},
-    {"job_id": "b", "operation": "generate", "prompt": "橘猫坐在阳台，写实照片", "model": "gpt-image-2.5", "size": "2k", "ratio": "3:2"},
+    {"job_id": "b", "operation": "generate", "prompt": "橘猫坐在阳台，写实照片", "model": "gpt-image-2.6", "size": "2k", "ratio": "3:2"},
     {"job_id": "edit-a", "operation": "edit", "prompt": "将背景换成纯白", "images": ["input.jpg", "reference.png"]}
   ]
 }
@@ -230,7 +252,7 @@ edit --prompt-file - (--last | --image <path> ...) --request-key <key> [--model 
 
 `batch_id`、`job_id` 使用 1-128 位字母、数字、点、下划线或短横线，首位为字母或数字。`job_id` 在批内唯一。编辑路径相对清单所在目录解析。先确定全部提示词，再写一次清单并运行 `batch`。同提示词的不同作业是独立变体；需要前一张结果的编辑应放到下一步。
 
-命令开始前会冻结默认模型、尺寸、提示词和输入快照，存入输出目录的 `.state/<scope>/batches/`，其中不含凭据。恢复时保持原清单、`batch_id`、`job_id`、输出目录和 scope。成功项复用，失败或未知项不会重发；独立项继续完成。变更同一批次的清单会被拒绝。快照包含提示词和参考图片，请按工作区资料保管。
+命令开始前会冻结默认模型、输出格式、尺寸、提示词和输入快照，存入输出目录的 `.state/<scope>/batches/`，其中不含凭据。恢复时保持原清单、`batch_id`、`job_id`、输出目录和 scope。成功项复用，失败或未知项不会重发；独立项继续完成。变更同一批次的清单会被拒绝。快照包含提示词和参考图片，请按工作区资料保管。
 
 `job_completed` 行含 `index`、`job_id`、`result`，完成即输出；最后的 `batch_completed` 含按原顺序排列的 `jobs`、`succeeded`、`failed`。任一项失败时退出码非零，成功图片仍保留。父级 `last.json` 按清单顺序保存所有成功图片；存在多张时，`edit --last` 会要求选图。
 
@@ -286,6 +308,7 @@ go build ./cmd/podotion-image
 - 首次下载、SHA-256 校验失败、缓存命中，以及无 Python 环境运行。
 - 各输入格式的真实解码、转换、透明度和 multipart 每部分 MIME / 文件名 / 字节 / 顺序，以及外层 boundary。
 - 无效输入零 POST、10 作业同步屏障并发、失败隔离、唯一文件名、请求键锁、冻结快照与安全恢复。
+- 多格式请求参数、GIF 动画字节和时序保留、真实 MIME 与扩展名、混合输出并发与恢复、格式指纹隔离、旧 PNG 状态兼容、GIF 编辑整批零 POST。
 
 CI 在 Windows、macOS、Linux 执行测试，Linux 额外执行 `go test -race ./...`，并继续交叉构建六平台静态产物。
 
@@ -303,9 +326,11 @@ C:\Users\scp-planet\.codex\podotion-image-regression\
 & 'C:\Users\scp-planet\.codex\podotion-image-regression\regression.exe' run --binary '<repo>\dist\podotion-image-windows-amd64.exe'
 ```
 
-默认模型 `gpt-image-2.5`，可用 `--model` 覆盖。先将独立测试 SK 写入工具目录的专用 `provider.toml`；不读取日常凭据。每次新运行建立隔离 workspace 和 `CODEX_HOME`。完整回归最多 5 个真实 POST：两张并发生图、JPEG 编辑、JPEG＋PNG＋WebP 编辑、GIF＋BMP＋TIFF 编辑。`resume --run <目录>` 沿用预算和请求身份；未知结果不换身份重试。工具检查文件可解码、数量及状态，不自动评判画面内容，也不会重发此前报告的证件照请求。
+默认模型 `gpt-image-2.6`，可用 `--model` 覆盖。先将独立测试 SK 写入工具目录的专用 `provider.toml`；不读取日常凭据。每次新运行建立隔离 workspace 和 `CODEX_HOME`。完整回归最多 5 个真实 POST：两张并发生图、JPEG 编辑、JPEG＋PNG＋WebP 编辑、GIF＋BMP＋TIFF 编辑。`resume --run <目录>` 沿用预算和请求身份；未知结果不换身份重试。工具检查文件可解码、数量及状态，不自动评判画面内容，也不会重发此前报告的证件照请求。
 
 发布后运行 `regression.exe upgrade`，在隔离环境实际安装 v2.2.0、执行旧启动器 `update --dry-run` 和 `update`，再检查新启动器下载、版本及缓存命中，并比较配置、模型及请求记录。升级验证不额外生图。后续可直接让 agent“运行 Podotion 本地回归”。
+
+v2.4 输出格式回归入口为同目录下的 `regression.exe formats --binary '<候选二进制>' --model gpt-image-2.6-flare`，同样最多 5 次请求：PNG、JPG、WebP、GIF 四项混合格式并发生成，以及一次混合参考图的 JPG 编辑。另做 GIF 编辑单张/批次本地拦截和成功请求恢复检查，不额外计费。GIF 验证全部帧可解码且至少两帧；服务端返回错误格式会明确记为验证未通过，不伪装成功。`formats --run <原运行目录>` 使用冻结的二进制、配置和原请求身份恢复，未知或失败请求不换标识重发。
 
 ## 发布
 
@@ -318,6 +343,6 @@ C:\Users\scp-planet\.codex\podotion-image-regression\
 - `linux/amd64`
 - `linux/arm64`
 
-每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.3.1，保留 v2.2.0 和 v2.3.0 发布。v2.3.1 修复 Windows 并发作业扫描其他请求记录时的文件共享冲突，并补充确定性的文件占用回归测试；原有上传、格式和批次能力保持兼容。
+每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.4.0，保留 v2.2.0、v2.3.0 和 v2.3.1 发布。v2.3.1 的 Windows 并发状态隔离修复继续保留。
 
-发布顺序：先将候选提交推送为 `v2.3.1` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade --expected 2.3.1` 回归，确认旧启动器可升级且凭据和请求记录保留。
+发布顺序：先将候选提交推送为 `v2.4.0` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade --expected 2.4.0` 回归，确认旧启动器可升级且凭据和请求记录保留。

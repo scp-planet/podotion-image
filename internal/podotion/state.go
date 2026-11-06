@@ -35,6 +35,7 @@ type RequestRecord struct {
 	FingerprintVersion int              `json:"fingerprint_version"`
 	Operation          string           `json:"operation"`
 	Model              string           `json:"model"`
+	OutputFormat       string           `json:"output_format,omitempty"`
 	Endpoint           string           `json:"endpoint"`
 	Size               string           `json:"size"`
 	CredentialProfile  string           `json:"credential_profile"`
@@ -162,6 +163,9 @@ func readRequestRecord(path string) (*RequestRecord, error) {
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("invalid request state: %s", path)
 	}
+	if record.OutputFormat == "" {
+		record.OutputFormat = DefaultOutputFormat
+	}
 	return &record, nil
 }
 
@@ -201,7 +205,7 @@ func iterRequestRecords(outputDir, scope string) ([]struct {
 	return out, nil
 }
 
-func RequestFingerprint(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt string, inputImages []string) (string, map[string]any, []InputImageMeta, error) {
+func RequestFingerprint(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt string, inputImages []string, outputFormat string) (string, map[string]any, []InputImageMeta, error) {
 	imageMetadata := make([]InputImageMeta, 0, len(inputImages))
 	for _, path := range inputImages {
 		digest, err := SHA256File(path)
@@ -214,10 +218,14 @@ func RequestFingerprint(operation, endpoint, model, size, credentialProfile, out
 		}
 		imageMetadata = append(imageMetadata, InputImageMeta{SHA256: digest, Bytes: info.Size()})
 	}
-	return fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt, imageMetadata)
+	return fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt, imageMetadata, outputFormat)
 }
 
-func fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt string, imageMetadata []InputImageMeta) (string, map[string]any, []InputImageMeta, error) {
+func fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile, outputDir, scope, prompt string, imageMetadata []InputImageMeta, outputFormat string) (string, map[string]any, []InputImageMeta, error) {
+	format, err := ResolveOutputFormat(operation, outputFormat)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	metadata := map[string]any{
 		"fingerprint_version": 1,
 		"operation":           operation,
@@ -229,6 +237,10 @@ func fingerprintFromMetadata(operation, endpoint, model, size, credentialProfile
 		"state_scope":         scope,
 		"prompt_sha256":       fmt.Sprintf("%x", sha256.Sum256([]byte(prompt))),
 		"input_images":        imageMetadata,
+	}
+	if format != DefaultOutputFormat {
+		metadata["fingerprint_version"] = 3
+		metadata["output_format"] = format
 	}
 	raw, err := json.Marshal(metadata)
 	if err != nil {
@@ -440,7 +452,7 @@ func AbandonRequest(outputDir, requestKey, scope string, acknowledged bool) (map
 	}, nil
 }
 
-func WriteLastState(outputDir string, images []SavedImage, operation, model, size, scope string) (string, error) {
+func WriteLastState(outputDir string, images []SavedImage, operation, model, size, scope, outputFormat string) (string, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return "", err
 	}
@@ -456,6 +468,9 @@ func WriteLastState(outputDir string, images []SavedImage, operation, model, siz
 		"model":      model,
 		"size":       size,
 		"images":     records,
+	}
+	if outputFormat != "" {
+		state["output_format"] = outputFormat
 	}
 	return path, atomicWriteJSON(path, state)
 }

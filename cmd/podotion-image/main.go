@@ -156,6 +156,7 @@ func runImageCommand(args []string, globalCredential, globalModel, operation str
 	stateScope := fs.String("state-scope", "", "stable task scope")
 	credentialFile := fs.String("credential-file", "", "private provider.toml path")
 	model := fs.String("model", "", "image model override")
+	outputFormat := fs.String("output-format", "", "png (default), jpg, jpeg, webp, or gif; GIF output is generation-only")
 	var images stringList
 	useLast := false
 	if operation == "edit" {
@@ -187,6 +188,7 @@ func runImageCommand(args []string, globalCredential, globalModel, operation str
 	result, err := podotion.RunGeneration(context.Background(), podotion.GenerateOptions{
 		CredentialFile: credentialOrDefault(*credentialFile, globalCredential),
 		Model:          modelOrDefault(*model, globalModel),
+		OutputFormat:   *outputFormat,
 		Operation:      operation,
 		Prompt:         text,
 		Size:           *size,
@@ -690,6 +692,7 @@ Options:
   --force-new              Do not reuse a recent equivalent success
   --state-scope SCOPE      Stable task scope for recovery and --last
   --model NAME             Model override for this call
+  --output-format FORMAT   png (default), jpg/jpeg, webp, gif (generation only)
   --credential-file PATH   Private provider.toml path
 `, operation)
 	if operation == "edit" {

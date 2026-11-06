@@ -12,6 +12,7 @@ import (
 type GenerateOptions struct {
 	CredentialFile string
 	Model          string
+	OutputFormat   string
 	Operation      string
 	Prompt         string
 	Size           string
@@ -49,6 +50,11 @@ type preparedGeneration struct {
 }
 
 func prepareGeneration(opts GenerateOptions, frozenConfig *ProviderConfig) (*preparedGeneration, error) {
+	format, err := ResolveOutputFormat(opts.Operation, opts.OutputFormat)
+	if err != nil {
+		return nil, err
+	}
+	opts.OutputFormat = format
 	resolvedSize, err := ResolveRequestSize(opts.Size, opts.Ratio)
 	if err != nil {
 		return nil, fmt.Errorf("%s", err)
@@ -66,7 +72,7 @@ func prepareGeneration(opts GenerateOptions, frozenConfig *ProviderConfig) (*pre
 	} else {
 		config = *frozenConfig
 	}
-	model := ResolveModel(opts.Model, ModelSource{Model: config.Model})
+	model := ResolveRequestModel(opts.Operation, format, opts.Model, ModelSource{Model: config.Model})
 	model, err = ValidateModel(model)
 	if err != nil {
 		return nil, err
@@ -108,7 +114,7 @@ func prepareGeneration(opts GenerateOptions, frozenConfig *ProviderConfig) (*pre
 	}
 	fingerprint, _, _, err := fingerprintFromMetadata(
 		opts.Operation, endpoint, model, resolvedSize.Value, provider.CredentialProfile,
-		outputDir, scopeValue, prompt, imageMetadata,
+		outputDir, scopeValue, prompt, imageMetadata, format,
 	)
 	if err != nil {
 		return nil, err
@@ -239,18 +245,22 @@ func runPreparedGeneration(ctx context.Context, prepared *preparedGeneration) (m
 	var body []byte
 	contentType := "application/json"
 	if opts.Operation == "edit" {
-		body, contentType, err = buildPreparedEditMultipart(model, prompt, prepared.inputs, resolvedSize.Value)
+		body, contentType, err = buildPreparedEditMultipart(model, prompt, prepared.inputs, resolvedSize.Value, opts.OutputFormat)
 	} else {
-		body, err = BuildImagesGenerationPayload(model, prompt, resolvedSize.Value)
+		body, err = BuildImagesGenerationPayload(model, prompt, resolvedSize.Value, opts.OutputFormat)
 	}
 	if err != nil {
 		return nil, err
 	}
 	record := newRequestRecord(opts.Operation, requestKey, fingerprint, model, endpoint, resolvedSize.Value, provider.CredentialProfile, outputDir, scopeValue, prompt, imageMetadata, opts.ForceNew)
+	record.OutputFormat = opts.OutputFormat
 	if prepared.batchID != "" {
 		record.FingerprintVersion = 2
 		record.BatchID = prepared.batchID
 		record.JobID = prepared.jobID
+	}
+	if opts.OutputFormat != DefaultOutputFormat {
+		record.FingerprintVersion = 3
 	}
 	if err := atomicWriteJSON(recordPath, record); err != nil {
 		return nil, err
@@ -293,6 +303,7 @@ func runPreparedGeneration(ctx context.Context, prepared *preparedGeneration) (m
 		if err == nil {
 			warnings = append(warnings, prepared.warnings...)
 			warnings = append(warnings, ImageSizeWarnings(resolvedSize.Value, saved)...)
+			warnings = append(warnings, ImageFormatWarnings(opts.OutputFormat, saved)...)
 			if warnings == nil {
 				warnings = []map[string]any{}
 			}
@@ -301,7 +312,7 @@ func runPreparedGeneration(ctx context.Context, prepared *preparedGeneration) (m
 					saved[index].SHA256 = digest
 				}
 			}
-			stateFile, stateErr := WriteLastState(outputDir, saved, opts.Operation, model, resolvedSize.Value, prepared.lastScope)
+			stateFile, stateErr := WriteLastState(outputDir, saved, opts.Operation, model, resolvedSize.Value, prepared.lastScope, opts.OutputFormat)
 			if stateErr != nil {
 				for _, image := range saved {
 					_ = os.Remove(image.Path)
@@ -393,9 +404,10 @@ func generationResult(record *RequestRecord, provider ProviderConfig, endpoint s
 		attempts = 1
 	}
 	return map[string]any{
-		"ok":        true,
-		"operation": record.Operation,
-		"model":     record.Model,
+		"ok":            true,
+		"operation":     record.Operation,
+		"model":         record.Model,
+		"output_format": record.OutputFormat,
 		"provider": map[string]any{
 			"id":                 provider.ProviderID,
 			"name":               provider.Name,
@@ -407,6 +419,7 @@ func generationResult(record *RequestRecord, provider ProviderConfig, endpoint s
 			"transport":                "images",
 			"endpoint":                 endpoint,
 			"size":                     size.Value,
+			"output_format":            record.OutputFormat,
 			"resolved_size":            size.AsMap(),
 			"input_image_count":        len(inputImages),
 			"request_key":              record.RequestKey,

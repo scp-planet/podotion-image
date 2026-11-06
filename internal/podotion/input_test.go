@@ -181,7 +181,7 @@ func TestMultipartTypesOrderAndExactBytes(t *testing.T) {
 			old := providerTransport
 			providerTransport = server.Client().Transport
 			defer func() { providerTransport = old }()
-			if _, err := PostImages(context.Background(), ProviderConfig{BaseURL: server.URL, Model: "test-model"}, "edit", "test prompt", paths, "auto"); err != nil {
+			if _, err := PostImages(context.Background(), ProviderConfig{BaseURL: server.URL, Model: "test-model"}, "edit", "test prompt", paths, "auto", ""); err != nil {
 				t.Fatal(err)
 			}
 		})

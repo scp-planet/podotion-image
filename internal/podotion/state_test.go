@@ -16,18 +16,18 @@ import (
 
 func TestRequestFingerprintIncludesModel(t *testing.T) {
 	dir := t.TempDir()
-	first, _, _, err := RequestFingerprint("generate", "https://example.com/v1/images/generations", "gpt-image-2", "1024x1024", "default", dir, "scope", "prompt", nil)
+	first, _, _, err := RequestFingerprint("generate", "https://example.com/v1/images/generations", "gpt-image-2", "1024x1024", "default", dir, "scope", "prompt", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, _, err := RequestFingerprint("generate", "https://example.com/v1/images/generations", "vendor/image-3", "1024x1024", "default", dir, "scope", "prompt", nil)
+	second, _, _, err := RequestFingerprint("generate", "https://example.com/v1/images/generations", "vendor/image-3", "1024x1024", "default", dir, "scope", "prompt", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == second {
 		t.Fatal("model change must change the fingerprint")
 	}
-	third, _, _, err := RequestFingerprint("generate", "https://example.com/v1/images/generations", "gpt-image-2", "1024x1024", "default", strings.ToUpper(dir), "scope", "prompt", nil)
+	third, _, _, err := RequestFingerprint("generate", "https://example.com/v1/images/generations", "gpt-image-2", "1024x1024", "default", strings.ToUpper(dir), "scope", "prompt", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestReadLastImage(t *testing.T) {
 	if err := os.WriteFile(path, fakePNG(64, 64), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteLastState(output, []SavedImage{NewSavedImage(path, "image/png", 33, nil, nil)}, "generate", DefaultModel, "1024x1024", "scope"); err != nil {
+	if _, err := WriteLastState(output, []SavedImage{NewSavedImage(path, "image/png", 33, nil, nil)}, "generate", DefaultModel, "1024x1024", "scope", "png"); err != nil {
 		t.Fatal(err)
 	}
 	last, err := ReadLastImage(output, "scope")

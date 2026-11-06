@@ -71,6 +71,26 @@ func TestModelPrecedence(t *testing.T) {
 	}
 }
 
+func TestGIFGenerationModelDefault(t *testing.T) {
+	tests := []struct {
+		name, operation, format, explicit, configured, expected string
+	}{
+		{name: "gif uses gif model when no model is configured", operation: "generate", format: "gif", expected: GIFDefaultModel},
+		{name: "gif is case insensitive", operation: "generate", format: "GIF", expected: GIFDefaultModel},
+		{name: "explicit model wins", operation: "generate", format: "gif", explicit: "explicit-model", configured: "custom-model", expected: "explicit-model"},
+		{name: "configured model wins", operation: "generate", format: "gif", configured: "custom-model", expected: "custom-model"},
+		{name: "non gif uses configured model", operation: "generate", format: "png", configured: "custom-model", expected: "custom-model"},
+		{name: "non gif uses normal default", operation: "generate", format: "png", expected: DefaultModel},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := ResolveRequestModel(test.operation, test.format, test.explicit, ModelSource{Model: test.configured}); actual != test.expected {
+				t.Fatalf("ResolveRequestModel() = %q, want %q", actual, test.expected)
+			}
+		})
+	}
+}
+
 func TestValidateModel(t *testing.T) {
 	valid := []string{"gpt-image-2", "gpt-image-2.5", "vendor/image-3", "team:image_4", "a"}
 	for _, value := range valid {

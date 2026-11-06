@@ -14,7 +14,7 @@ import (
 )
 
 func TestBuildImagesGenerationPayload(t *testing.T) {
-	raw, err := BuildImagesGenerationPayload("vendor/image-3", "a prompt", "1024x1024")
+	raw, err := BuildImagesGenerationPayload("vendor/image-3", "a prompt", "1024x1024", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestPostImagesGenerateUsesModelAndRedactsErrors(t *testing.T) {
 	providerTransport = server.Client().Transport
 	defer func() { providerTransport = original }()
 	provider := ProviderConfig{BaseURL: server.URL, Model: "vendor/image-3", BearerToken: "sk-secret", ProviderID: DirectProviderID, Name: SiteName}
-	response, err := PostImages(context.Background(), provider, "generate", "prompt-text", nil, "1024x1024")
+	response, err := PostImages(context.Background(), provider, "generate", "prompt-text", nil, "1024x1024", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestPostImagesGenerateUsesModelAndRedactsErrors(t *testing.T) {
 	defer errorServer.Close()
 	providerTransport = errorServer.Client().Transport
 	provider.BaseURL = errorServer.URL
-	_, err = PostImages(context.Background(), provider, "generate", "prompt-text", nil, "1024x1024")
+	_, err = PostImages(context.Background(), provider, "generate", "prompt-text", nil, "1024x1024", "")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -118,7 +118,7 @@ func TestPostImagesEditMultipart(t *testing.T) {
 	providerTransport = server.Client().Transport
 	defer func() { providerTransport = original }()
 	provider := ProviderConfig{BaseURL: server.URL, Model: "vendor/image-3", BearerToken: "sk-secret"}
-	if _, err := PostImages(context.Background(), provider, "edit", "edit it", []string{imagePath}, "1024x1024"); err != nil {
+	if _, err := PostImages(context.Background(), provider, "edit", "edit it", []string{imagePath}, "1024x1024", ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -135,7 +135,7 @@ func TestPostImagesHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	provider := ProviderConfig{BaseURL: server.URL, Model: DefaultModel, BearerToken: "sk-secret"}
-	if _, err := PostImages(ctx, provider, "generate", "prompt", nil, "auto"); err == nil {
+	if _, err := PostImages(ctx, provider, "generate", "prompt", nil, "auto", ""); err == nil {
 		t.Fatal("expected cancellation error")
 	}
 }
