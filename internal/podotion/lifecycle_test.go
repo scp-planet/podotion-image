@@ -202,6 +202,71 @@ func TestUpdateRejectsIncompleteArchive(t *testing.T) {
 	}
 }
 
+func TestUpdateModelMigrationAndRollback(t *testing.T) {
+	for _, test := range []struct {
+		name, fields, want string
+		invalid            bool
+	}{
+		{"old managed default", "model = \"gpt-image-2\"\n", DefaultModel, false},
+		{"explicit legacy choice", "model = \"gpt-image-2\"\nmodel_policy = \"user\"\n", "gpt-image-2", false},
+		{"custom choice", "model = \"vendor/image\"\n", "vendor/image", false},
+		{"invalid policy rollback", "model_policy = \"invalid\"\n", "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			target := ExpectedSkillRoot(codexHome)
+			writeMinimalSkill(t, target, "old")
+			configPath := CredentialPath(codexHome)
+			content := "base_url = \"https://ai.podotion.com/v1\"\nPodotionImageSk = 'sk-default' # keep\nPodotionImage4kSk = 'sk-4k'\n" + test.fields
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(makeStoredZip(archiveFiles("new"))) }))
+			defer server.Close()
+			oldURL, oldClient := repositoryArchiveURL, lifecycleHTTPClient
+			repositoryArchiveURL, lifecycleHTTPClient = server.URL, server.Client()
+			defer func() { repositoryArchiveURL, lifecycleHTTPClient = oldURL, oldClient }()
+			_, previewErr := UpdateSkill(context.Background(), target, codexHome, true)
+			before, _ := os.ReadFile(configPath)
+			if string(before) != content {
+				t.Fatal("dry run changed configuration")
+			}
+			result, err := UpdateSkill(context.Background(), target, codexHome, false)
+			if test.invalid {
+				if err == nil || previewErr == nil {
+					t.Fatal("invalid configuration was not rejected")
+				}
+				after, _ := os.ReadFile(configPath)
+				skill, _ := os.ReadFile(filepath.Join(target, "SKILL.md"))
+				if string(after) != content || !strings.Contains(string(skill), "old") {
+					t.Fatal("migration failure lost old installation or config")
+				}
+				return
+			}
+			if err != nil || previewErr != nil || result["updated"] != true {
+				t.Fatalf("update failed: %v %v", err, previewErr)
+			}
+			config, err := LoadConfig(configPath)
+			if err != nil || config.Model != test.want || config.BearerToken != "sk-default" || config.BearerToken4K != "sk-4k" {
+				t.Fatalf("model migration failed: %v", err)
+			}
+			after, _ := os.ReadFile(configPath)
+			if !strings.Contains(string(after), "PodotionImageSk = 'sk-default' # keep\nPodotionImage4kSk = 'sk-4k'\n") {
+				t.Fatal("credential lines changed")
+			}
+			if test.want != DefaultModel && string(after) != content {
+				t.Fatal("explicit choice was rewritten")
+			}
+			if _, err := UpdateSkill(context.Background(), target, codexHome, false); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestUpdateRenameFailureRestoresOldInstallation(t *testing.T) {
 	for _, rollbackFails := range []bool{false, true} {
 		t.Run(fmt.Sprint(rollbackFails), func(t *testing.T) {

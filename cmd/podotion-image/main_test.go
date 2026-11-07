@@ -125,6 +125,10 @@ func TestCLIConfigAndModel(t *testing.T) {
 	if payload["model"] != "gpt-image-2.6" {
 		t.Fatalf("unexpected default model: %v", payload["model"])
 	}
+	initial, err := podotion.LoadConfig(filepath.Join(codexHome, "podotion-image", "provider.toml"))
+	if err != nil || initial.ModelPolicy != "default" {
+		t.Fatalf("new configuration must track the default: %v", err)
+	}
 	_, stderr, code = runCLI(t, env, "", "config", "set-model", "vendor/image-3")
 	if code != 0 {
 		t.Fatalf("set-model failed: %s", stderr)
@@ -156,7 +160,7 @@ func TestCLIConfigPreservesExistingModel(t *testing.T) {
 	}{
 		{
 			name:    "explicit model",
-			content: "base_url = \"https://ai.podotion.com/v1\"\nmodel = \"gpt-image-2\"\nPodotionImageSk = \"sk-old\"\n",
+			content: "base_url = \"https://ai.podotion.com/v1\"\nmodel = \"gpt-image-2\"\nmodel_policy = \"user\"\nPodotionImageSk = \"sk-old\"\n",
 			want:    "gpt-image-2",
 		},
 		{
@@ -198,6 +202,47 @@ func TestCLIConfigPreservesExistingModel(t *testing.T) {
 				t.Fatalf("provider.toml does not contain the new credential")
 			}
 		})
+	}
+}
+
+func TestCLIModelMigrationAndPin(t *testing.T) {
+	codexHome := t.TempDir()
+	path := filepath.Join(codexHome, "podotion-image", "provider.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "base_url = \"https://ai.podotion.com/v1\"\nmodel = \"gpt-image-2\"\nPodotionImageSk = \"sk-default\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"CODEX_HOME=" + codexHome, "HTTPS_PROXY=http://127.0.0.1:1"}
+	for _, args := range [][]string{{"config", "--check"}, {"config", "migrate-default", "--dry-run"}} {
+		out, stderr, code := runCLI(t, env, "", args...)
+		if code != 0 || !strings.Contains(out, `"model": "gpt-image-2.6"`) {
+			t.Fatalf("model resolution failed: %s %s", out, stderr)
+		}
+		before, _ := os.ReadFile(path)
+		if string(before) != content {
+			t.Fatal("read-only command modified configuration")
+		}
+	}
+	out, stderr, code := runCLI(t, env, "", "config", "migrate-default")
+	if code != 0 || !strings.Contains(out, `"updated": true`) {
+		t.Fatalf("migration failed: %s %s", out, stderr)
+	}
+	for _, args := range [][]string{{"config", "set-model", "gpt-image-2"}, {"config", "migrate-default"}, {"config", "--check"}} {
+		out, stderr, code = runCLI(t, env, "", args...)
+		if code != 0 || !strings.Contains(out, `"model": "gpt-image-2"`) || !strings.Contains(out, `"model_policy": "user"`) {
+			t.Fatalf("explicit model lost: %s %s", out, stderr)
+		}
+	}
+	_, stderr, code = runCLI(t, env, "PodotionImage4kSk=sk-4k\n", "config", "--stdin", "--set-4k", "--force")
+	if code != 0 {
+		t.Fatal(stderr)
+	}
+	out, stderr, code = runCLI(t, env, "", "config", "--check")
+	if code != 0 || !strings.Contains(out, `"model_policy": "user"`) || !strings.Contains(out, `"model": "gpt-image-2"`) {
+		t.Fatalf("4K credential update lost model choice: %s %s", out, stderr)
 	}
 }
 func TestCLIGenerateWithoutCredentialsFailsSafely(t *testing.T) {

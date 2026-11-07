@@ -7,10 +7,10 @@ import (
 
 const (
 	SiteName              = "Podotion"
-	BinaryVersion         = "2.4.1"
+	BinaryVersion         = "2.4.2"
 	DefaultModel          = "gpt-image-2.6"
-	GIFDefaultModel       = "gpt-image-2.6"
-	LegacyDefaultModel    = "gpt-image-2.6"
+	GIFDefaultModel       = DefaultModel
+	LegacyDefaultModel    = DefaultModel
 	DirectProviderID      = "podotion-direct"
 	DirectBaseURL         = "https://ai.podotion.com/v1"
 	DirectConfigDirectory = "podotion-image"
@@ -139,6 +139,7 @@ type ProviderConfig struct {
 	Name              string
 	BaseURL           string
 	Model             string
+	ModelPolicy       string
 	BearerToken       string
 	BearerToken4K     string
 	CredentialMode    string

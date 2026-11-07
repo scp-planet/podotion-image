@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "version": "2.4.1",
+  "version": "2.4.2",
   "repository": "scp-planet/podotion-image",
-  "tag": "v2.4.1",
+  "tag": "v2.4.2",
   "assets": {
     "windows-amd64": "podotion-image-windows-amd64.exe",
     "windows-arm64": "podotion-image-windows-arm64.exe",

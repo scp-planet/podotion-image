@@ -298,6 +298,27 @@ func runSizes(args []string, globalModel string, stdout, stderr io.Writer) int {
 	return emitResult(stdout, podotion.RunSizes(modelOrDefault(*model, globalModel)))
 }
 func runConfig(args []string, globalCredential string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "migrate-default" {
+		fs := flag.NewFlagSet("config migrate-default", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		credentialFile := fs.String("credential-file", "", "private provider.toml path")
+		dryRun := fs.Bool("dry-run", false, "preview the default model migration")
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				printUsage(stdout)
+				return 0
+			}
+			return emitError(stderr, err)
+		}
+		if fs.NArg() != 0 {
+			return emitError(stderr, fmt.Errorf("config migrate-default accepts no positional arguments"))
+		}
+		result, err := podotion.MigrateDefaultModel(credentialOrDefault(*credentialFile, globalCredential), *dryRun)
+		if err != nil {
+			return emitError(stderr, err)
+		}
+		return emitResult(stdout, result)
+	}
 	if len(args) > 0 && args[0] == "set-model" {
 		fs := flag.NewFlagSet("config set-model", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -674,8 +695,10 @@ Commands:
   request-abandon     Acknowledge and abandon an uncertain request
   version             Print the runtime version
 
-Model precedence: --model > provider.toml model > new-install default `+podotion.DefaultModel+`
-Legacy provider.toml without model: `+podotion.LegacyDefaultModel+`
+Model precedence: --model > user-selected model > managed default `+podotion.DefaultModel+`
+  config set-model NAME             Pin a user-selected default across updates
+  config migrate-default [--dry-run] Migrate legacy managed model fields locally
+model_policy: default follows Skill defaults; user preserves an explicit choice
 `)
 }
 

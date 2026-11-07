@@ -1,6 +1,6 @@
 ---
 name: podotion-image
-description: Podotion Image v2.4.1. Generate or edit PNG, JPG, WebP, or GIF images, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
+description: Podotion Image v2.4.2. Generate or edit PNG, JPG, WebP, or GIF images, or batch images concurrently through Podotion; configure models, diagnose, update, migrate, or uninstall the Skill. Use for Podotion image requests, including "edit the last image", and Skill configuration or management. Do not trigger for text-only explanations about image models.
 ---
 
 # Podotion Image
@@ -19,7 +19,7 @@ On first use the launcher downloads the matching native binary from the fixed Gi
 
 ## First-image preflight
 
-Before the first generate or edit action in every new task, run `config --check` and `status`. Both checks are local and read-only: they must not contact Podotion, print credential values, write files, or create an image request. Run them once per task, not before every image action.
+Before the first generate or edit action in every new task, run `config migrate-default`, then `config --check` and `status`. Migration is local, non-billable, and idempotent; it updates only the managed model fields and preserves credentials and explicit user choices. This also completes migration after an older updater installed this Skill. The two checks remain local and read-only: they must not contact Podotion, print credential values, write files, or create an image request. Run this preflight once per task, not before every image action.
 
 For a multi-image request, resolve every requested image's size and credential profile before the first billable call. If any image needs an unavailable credential, complete credential onboarding before generating any image; do not leave the user with a partially generated batch followed by a configuration restart.
 
@@ -52,11 +52,13 @@ After any successful credential write, run non-billable `doctor` without `--imag
 
 ## Model configuration
 
-The image model is configurable. When no model is specified, image generation defaults to `gpt-image-2.6`; an explicit `provider.toml` model or per-call `--model` still wins. Skill installation and update never rewrite existing configuration files.
+The image model is configurable. All generation, edit, GIF, and batch requests default to `gpt-image-2.6` unless the user explicitly chose another default or a per-call model. Updates migrate managed defaults while preserving credentials and explicit user choices.
 
 - The persisted default lives in `provider.toml` as the optional `model = "<name>"` field.
-- Model precedence is fixed: a per-call `--model <name>` overrides `provider.toml`, which overrides the default `gpt-image-2.6`. Existing files without `model` also resolve to `gpt-image-2.6`.
-- Never rewrite `provider.toml` during Skill installation or update; only explicit `config`, `config set-model`, or `config --set-4k` actions may change it.
+- Model precedence is fixed: a per-call `--model <name>` overrides a user-selected default (`model_policy = "user"`), which overrides the managed default `gpt-image-2.6` (`model_policy = "default"`).
+- `config set-model <name>` records `model_policy = "user"`; preserve this choice on updates even when the name equals a former default. A one-time `--model` never pins the default.
+- Legacy configurations without `model_policy` cannot prove user intent. Missing models and historical defaults `gpt-image-2`, `gpt-image-2.5`, and `gpt-image-2.6` migrate to the managed default; other model names are preserved as user choices. If the current conversation establishes that the user explicitly wants a legacy model as their default, run `config set-model <name>` before migration. Do not invent a user choice from old result records or regression examples.
+- Use `config migrate-default` to persist migration. Never read or rewrite credentials directly. `config --check` reports the effective model and policy without writing files.
 - Never infer capabilities, pricing, or size limits from the model name. Keep the existing size, 4K, and dual-SK rules. Send unknown model names to the upstream API and report its sanitized error.
 
 Handle natural-language model intent as follows:
@@ -121,7 +123,7 @@ Write a UTF-8 manifest once, with stable IDs for recovery:
 }
 ```
 
-Each job requires a unique `job_id`, `operation` (`generate` or `edit`), and complete `prompt`. Optional fields are `model`, `output_format`, `size`, `ratio`, and `images` (an array of explicit paths for edits). Each job can select its own output format; omitted format is PNG. A generation job with `output_format: "gif"` and no explicit `model` uses `gpt-image-2.6`; other jobs with an omitted model use the configured default. Explicit per-job or global model overrides always win, and the GIF default is not persisted. Relative image paths resolve against the manifest directory. Omitted model uses the configured default, frozen for this batch at its first run, except for the GIF generation rule above.
+Each job requires a unique `job_id`, `operation` (`generate` or `edit`), and complete `prompt`. Optional fields are `model`, `output_format`, `size`, `ratio`, and `images` (an array of explicit paths for edits). Each job can select its own output format; omitted format is PNG. All formats and operations use the same model precedence: an explicit job or global model wins, followed by a user-selected default, followed by `gpt-image-2.6`. Omit model fields unless the user selected a model; do not copy a model from examples or previous requests. Relative image paths resolve against the manifest directory. The effective model is frozen for this batch at its first run; recovery keeps the original snapshot.
 
 - Require an explicit image count; ask for it when missing. A batch contains 1-10 jobs; split larger counts into batches.
 - Resolve all prompts, output formats, sizes, models, credentials, and output locations before the first billable call. GIF output is valid for both generation and edit jobs; a GIF input is snapshotted and reduced to its first frame before submission.
@@ -157,11 +159,11 @@ This Skill does not register MCP `resource_link` entries or publish to the Codex
 Run lifecycle commands only when the user explicitly requests them:
 
 - Status: `status`.
-- Update: run `update --dry-run`, then `update`.
+- Update: run `update --dry-run`, then `update`. After a successful update, run the installed launcher's `config migrate-default` once to complete migration even when the previous updater predates v2.4.2. Then stop. This is a local configuration migration, not an image request.
 - Legacy Plugin migration: after the user accepts the current task's migration prompt, run non-billable `doctor` without `--image-probe`. Only when that current doctor succeeds, run `uninstall-legacy-plugin --yes`. The command removes only the owned `podotion-image@personal` registration and exact legacy source, and preserves credentials, the new Skill, images, and request state.
 - Uninstall: explain that credentials and generated images are preserved, obtain explicit confirmation, then run `uninstall --yes`.
 
-Updates download the fixed GitHub repository ZIP over HTTPS and replace the installed Skill transactionally; they do not require Git, Python, or Node. After update, migration, uninstall, or completed credential onboarding, stop; tell the user to restart Codex and create a new task. Do not continue using replaced or removed Skill code.
+Updates download the fixed GitHub repository ZIP over HTTPS and replace the installed Skill transactionally; they do not require Git, Python, or Node. The native updater migrates managed model defaults and preserves explicit user models, credentials, images, and request records; dry-run changes no configuration. After the update and its one local model migration, uninstall, or completed credential onboarding, stop; tell the user to restart Codex and create a new task. Do not continue image work using replaced or removed Skill code.
 
 ## Failures
 

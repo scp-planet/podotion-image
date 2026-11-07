@@ -1,6 +1,6 @@
-# Podotion Image v2.4.1
+# Podotion Image v2.4.2
 
-All image generation defaults to `gpt-image-2.6` when no model is specified. An explicit `provider.toml` model or per-call model still wins, and installation does not rewrite existing configuration.
+All image operations default to `gpt-image-2.6`. Updates migrate managed defaults in `provider.toml` while preserving credentials and explicitly selected user models.
 
 Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill。它使用 Go 原生 CLI 调用 Podotion Images API，支持生成、编辑、精确尺寸、请求恢复、双 SK 路由、诊断、更新、旧 Plugin 迁移和卸载。
 
@@ -10,7 +10,7 @@ Podotion Image 是一个可由 Codex Skills Install 直接安装的独立 Skill�
 $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 ```
 
-生图模型可配置。全新配置默认使用 `gpt-image-2.6`；已有配置不会被安装或更新流程修改。
+生图模型可配置。全新配置及升级后的托管默认模型统一使用 `gpt-image-2.6`；用户明确指定的默认模型、凭据和请求记录继续保留。
 
 ## 主要变化
 
@@ -30,8 +30,8 @@ $CODEX_HOME/podotion-image/runtime/<version>/<os>-<arch>/
 - `auto`、1K、2K 和未达到 4K 标准的精确尺寸使用 `PodotionImageSk`。
 - 显式 4K 档、规范 4K 档尺寸或总像素达到 8,294,400 时使用 `PodotionImage4kSk`。
 - 旧单 SK 配置继续支持非 4K 请求；4K SK 缺失时在联网和写请求状态前失败，不回退默认 SK。
-- 旧 `provider.toml` 没有 `model` 字段时也使用 `gpt-image-2.6`；安装或更新不会改写用户配置。
-- 模型优先级固定为：`--model` > `provider.toml` 的 `model` > 默认 `gpt-image-2.6`。
+- 升级自动将托管默认模型迁移为 `gpt-image-2.6`，仅调整模型字段；凭据、图片及请求记录保留。
+- 模型优先级固定为：`--model` > 用户指定的默认模型（`model_policy = "user"`）> 托管默认 `gpt-image-2.6`（`model_policy = "default"`）。
 - 不根据模型名自动推断能力；尺寸、4K 和双 SK 规则保持不变。未知模型由上游报错。
 - 用户给出的合法精确像素尺寸会原样发送，不映射到最近档位。
 - 每次上游请求固定 `n=1`，从标准 `data[]` 或明确兼容的 `output[]`、`response.output[]` 中只接受一张最终结果；每个图片操作最多发送一次 POST，不自动重试，请求超时固定为 600 秒。
@@ -69,11 +69,18 @@ $CODEX_HOME/podotion-image/provider.toml
 ```toml
 base_url = "https://ai.podotion.com/v1"
 model = "gpt-image-2.6"
+model_policy = "default"
 PodotionImageSk = "sk-..."
 PodotionImage4kSk = "sk-..."
 ```
 
-`model` 和 `PodotionImage4kSk` 都是可选项。新建配置时 `model` 默认为 `gpt-image-2.6`；已有配置缺少 `model` 时也按 `gpt-image-2.6` 解释。Skill 安装或更新不会改写 `provider.toml`。`base_url` 固定为 `https://ai.podotion.com/v1`。
+`model`、`model_policy` 和 `PodotionImage4kSk` 都是可选项。新建配置及托管默认值使用 `gpt-image-2.6`，生成、编辑、GIF 和批次遵循相同规则。`base_url` 固定为 `https://ai.podotion.com/v1`。
+
+`model_policy = "default"` 表示随 Skill 更新的托管默认；`"user"` 表示用户明确选择，升级保留。`config set-model <name>` 自动标记为用户选择，单次 `--model` 不修改配置。更新凭据和追加 4K SK 也保留该标记。
+
+旧版没有记录模型来源，无法可靠区分历史默认值和同名的手工选择。无来源标记且模型缺失或为 `gpt-image-2`、`gpt-image-2.5`、`gpt-image-2.6` 时迁移为托管默认；其他自定义模型保留。如果用户明确要保留旧默认同名模型，先运行一次 `config set-model <name>` 固定选择。可用 `config migrate-default --dry-run` 只读预览迁移，`config --check` 只读报告有效模型及来源。
+
+v2.4.2 原生升级器会在更新事务中执行模型迁移；旧版升级器只替换 Skill 时，新版 Skill 会在升级后的补充步骤或下个任务首次生图预检中自动调用 `config migrate-default`，无需用户手工改配置。失败升级不会迁移配置；迁移失败则恢复旧安装。
 
 ### 写入凭据
 
@@ -106,7 +113,7 @@ config set-model gpt-image-3
 config --check
 ```
 
-`set-model` 会保留已有 SK，只更新 `provider.toml` 的 `model`。自然语言行为：
+`set-model` 会保留已有 SK，更新 `provider.toml` 的 `model` 并设置 `model_policy = "user"`。自然语言行为：
 
 - “以后默认用 `gpt-image-3`” → 运行 `config set-model gpt-image-3`。
 - “这次用 `gpt-image-2` 生成” → 该次命令追加 `--model gpt-image-2`，不持久化。
@@ -117,6 +124,7 @@ config --check
 安装并重启后直接描述任务。Skill 会在每个新任务的首次图片操作前执行一次本地预检：
 
 ```text
+config migrate-default
 config --check
 status
 ```
@@ -330,7 +338,7 @@ C:\Users\scp-planet\.codex\podotion-image-regression\
 
 发布后运行 `regression.exe upgrade`，在隔离环境实际安装 v2.2.0、执行旧启动器 `update --dry-run` 和 `update`，再检查新启动器下载、版本及缓存命中，并比较配置、模型及请求记录。升级验证不额外生图。后续可直接让 agent“运行 Podotion 本地回归”。
 
-v2.4.1 输出格式回归入口为同目录下的 `regression.exe formats --binary '<候选二进制>' --model gpt-image-2.6-flare`，同样最多 5 次请求：PNG、JPG、WebP、GIF 四项混合格式并发生成，以及一次混合参考图的 JPG 编辑。GIF 回归同时覆盖无参考图生成、静态参考图编辑和 GIF 首帧参考图编辑；服务端返回错误格式会明确记为验证未通过，不伪装成功。`formats --run <原运行目录>` 使用冻结的二进制、配置和原请求身份恢复，未知或失败请求不换标识重发。
+输出格式回归入口为同目录下的 `regression.exe formats --binary '<候选二进制>' --model gpt-image-2.6`，同样最多 5 次请求：PNG、JPG、WebP、GIF 四项混合格式并发生成，以及一次混合参考图的 JPG 编辑。服务端返回错误格式会明确记为验证未通过，不伪装成功。`formats --run <原运行目录>` 使用冻结的二进制、配置和原请求身份恢复，未知或失败请求不换标识重发。
 
 ## 发布
 
@@ -343,6 +351,6 @@ v2.4.1 输出格式回归入口为同目录下的 `regression.exe formats --bina
 - `linux/amd64`
 - `linux/arm64`
 
-每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.4.1，保留 v2.2.0、v2.3.0、v2.3.1 和 v2.4.0 发布。v2.3.1 的 Windows 并发状态隔离修复继续保留。
+每个二进制以 `CGO_ENABLED=0` 构建，并发布对应 `.sha256` 文件。版本常量、运行时清单和 Skill 简介统一为 v2.4.2，保留旧版发布。v2.3.1 的 Windows 并发状态隔离修复继续保留。
 
-发布顺序：先将候选提交推送为 `v2.4.1` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后运行本地 `upgrade --expected 2.4.1` 回归，确认旧启动器可升级且凭据和请求记录保留。
+发布顺序：先将候选提交推送为 `v2.4.2` 标签，等待六平台二进制和校验资源发布并验证可下载，再让 `main` 指向该提交。不要在资源发布前把新 `runtime.json` 推到 `main`。随后验证旧启动器升级和新版 `config migrate-default` 补迁移，确认历史默认值更新、用户选择保留、凭据和请求记录保留。

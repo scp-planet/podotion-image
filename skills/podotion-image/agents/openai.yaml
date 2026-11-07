@@ -1,6 +1,6 @@
 interface:
   display_name: "Podotion Image"
-  short_description: "v2.4.1 · PNG, JPG, WebP, GIF and concurrent batches"
+  short_description: "v2.4.2 · Automatic model defaults, GIF and batches"
   default_prompt: "Use $podotion-image to generate an image from my description."
 
 policy:

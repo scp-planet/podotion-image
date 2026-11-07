@@ -69,6 +69,7 @@ func LoadConfig(path string) (ProviderConfig, error) {
 	allowed := map[string]bool{
 		"base_url":       true,
 		"model":          true,
+		"model_policy":   true,
 		DefaultSecretKey: true,
 		FourKSecretKey:   true,
 	}
@@ -92,11 +93,7 @@ func LoadConfig(path string) (ProviderConfig, error) {
 			return ProviderConfig{}, err
 		}
 	}
-	model := strings.TrimSpace(values["model"])
-	if model == "" {
-		model = LegacyDefaultModel
-	}
-	model, err = ValidateModel(model)
+	model, policy, err := resolveConfiguredModel(values["model"], values["model_policy"])
 	if err != nil {
 		return ProviderConfig{}, err
 	}
@@ -105,11 +102,40 @@ func LoadConfig(path string) (ProviderConfig, error) {
 		Name:           SiteName,
 		BaseURL:        DirectBaseURL,
 		Model:          model,
+		ModelPolicy:    policy,
 		BearerToken:    token,
 		BearerToken4K:  token4k,
 		CredentialMode: "podotion_image_sk",
 		ConfigPath:     target,
 	}, nil
+}
+
+func resolveConfiguredModel(model, policy string) (string, string, error) {
+	model = strings.TrimSpace(model)
+	if model != "" {
+		if _, err := ValidateModel(model); err != nil {
+			return "", "", err
+		}
+	}
+	if policy == "" {
+		switch model {
+		case "", "gpt-image-2", "gpt-image-2.5", "gpt-image-2.6":
+			policy = "default"
+		default:
+			policy = "user"
+		}
+	}
+	switch policy {
+	case "default":
+		return DefaultModel, policy, nil
+	case "user":
+		if model == "" {
+			return "", "", fmt.Errorf("model_policy user requires a model")
+		}
+		return model, policy, nil
+	default:
+		return "", "", fmt.Errorf("model_policy must be default or user")
+	}
 }
 
 func parseFlatTOML(content string) (map[string]string, error) {
@@ -239,16 +265,7 @@ func ResolveModel(explicit string, config ModelSource) string {
 }
 
 func ResolveRequestModel(operation, outputFormat, explicit string, config ModelSource) string {
-	if strings.TrimSpace(explicit) != "" {
-		return strings.TrimSpace(explicit)
-	}
-	if strings.TrimSpace(config.Model) != "" {
-		return strings.TrimSpace(config.Model)
-	}
-	if operation == "generate" && strings.EqualFold(strings.TrimSpace(outputFormat), "gif") {
-		return GIFDefaultModel
-	}
-	return DefaultModel
+	return ResolveModel(explicit, config)
 }
 
 type ModelSource struct {
@@ -264,6 +281,14 @@ func ReadExistingConfig(path string) (defaultSecret, fourKSecret, model string, 
 }
 
 func RenderConfig(defaultSecret, fourKSecret, model string) (string, error) {
+	_, policy, err := resolveConfiguredModel(model, "")
+	if err != nil {
+		return "", err
+	}
+	return renderConfig(defaultSecret, fourKSecret, model, policy)
+}
+
+func renderConfig(defaultSecret, fourKSecret, model, policy string) (string, error) {
 	defaultValue, err := validateSecret(defaultSecret, DefaultSecretKey)
 	if err != nil {
 		return "", err
@@ -282,12 +307,16 @@ func RenderConfig(defaultSecret, fourKSecret, model string) (string, error) {
 			return "", err
 		}
 	}
+	if policy == "default" {
+		modelValue = DefaultModel
+	}
 	lines := []string{
 		fmt.Sprintf("base_url = %s", strconv.Quote(DirectBaseURL)),
 	}
 	if modelValue != "" {
 		lines = append(lines, fmt.Sprintf("model = %s", strconv.Quote(modelValue)))
 	}
+	lines = append(lines, fmt.Sprintf("model_policy = %s", strconv.Quote(policy)))
 	lines = append(lines, fmt.Sprintf("%s = %s", DefaultSecretKey, strconv.Quote(defaultValue)))
 	if fourKValue != "" {
 		lines = append(lines, fmt.Sprintf("%s = %s", FourKSecretKey, strconv.Quote(fourKValue)))
@@ -296,14 +325,29 @@ func RenderConfig(defaultSecret, fourKSecret, model string) (string, error) {
 }
 
 func WriteConfig(path, defaultSecret, fourKSecret, model string) (string, error) {
+	_, policy, err := resolveConfiguredModel(model, "")
+	if err != nil {
+		return "", err
+	}
+	if existing, err := LoadConfig(path); err == nil && existing.Model == model {
+		policy = existing.ModelPolicy
+	}
+	return writeConfig(path, defaultSecret, fourKSecret, model, policy)
+}
+
+func writeConfig(path, defaultSecret, fourKSecret, model, policy string) (string, error) {
 	target, err := ConfigPath(path)
 	if err != nil {
 		return "", err
 	}
-	content, err := RenderConfig(defaultSecret, fourKSecret, model)
+	content, err := renderConfig(defaultSecret, fourKSecret, model, policy)
 	if err != nil {
 		return "", err
 	}
+	return writeConfigContent(target, content)
+}
+
+func writeConfigContent(target, content string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return "", fmt.Errorf("cannot create the credential directory: %w", err)
 	}
@@ -349,14 +393,15 @@ func SetModel(path, model string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := WriteConfig(target, defaultSecret, fourKSecret, model); err != nil {
+	if _, err := writeConfig(target, defaultSecret, fourKSecret, model, "user"); err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"ok":          true,
-		"operation":   "set-model",
-		"config_path": target,
-		"model":       model,
+		"ok":           true,
+		"operation":    "set-model",
+		"config_path":  target,
+		"model":        model,
+		"model_policy": "user",
 		"credential_profiles": map[string]any{
 			"default": true,
 			"4k":      fourKSecret != "",
@@ -369,20 +414,86 @@ func ConfigCheck(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, fourKSecret, model, err := ReadExistingConfig(target)
+	config, err := LoadConfig(target)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"ok":          true,
-		"operation":   "check",
-		"config_path": target,
-		"model":       model,
+		"ok":           true,
+		"operation":    "check",
+		"config_path":  target,
+		"model":        config.Model,
+		"model_policy": config.ModelPolicy,
 		"credential_profiles": map[string]any{
 			"default": true,
-			"4k":      fourKSecret != "",
+			"4k":      config.BearerToken4K != "",
 		},
 	}, nil
+}
+
+func MigrateDefaultModel(path string, dryRun bool) (map[string]any, error) {
+	target, err := ConfigPath(path)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{"ok": true, "operation": "migrate-default", "updated": false}
+	if _, err := os.Stat(target); os.IsNotExist(err) {
+		result["skipped"] = "config_missing"
+		return result, nil
+	}
+	config, err := LoadConfig(target)
+	if err != nil {
+		return nil, err
+	}
+	result["model"], result["model_policy"] = config.Model, config.ModelPolicy
+	if config.ModelPolicy == "user" {
+		return result, nil
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read configuration for model migration")
+	}
+	content := strings.TrimPrefix(string(raw), "\ufeff")
+	values, err := parseFlatTOML(content)
+	if err != nil {
+		return nil, err
+	}
+	wouldUpdate := values["model"] != DefaultModel || values["model_policy"] != "default"
+	if dryRun {
+		result["would_update"] = wouldUpdate
+		return result, nil
+	}
+	if !wouldUpdate {
+		return result, nil
+	}
+	newline := "\n"
+	if strings.Contains(content, "\r\n") {
+		newline = "\r\n"
+	}
+	for _, key := range []string{"model", "model_policy"} {
+		value := DefaultModel
+		if key == "model_policy" {
+			value = "default"
+		}
+		assignment := key + " = " + strconv.Quote(value)
+		pattern := regexp.MustCompile(`(?m)^[\t ]*` + key + `[\t ]*=[^\r\n]*`)
+		if pattern.MatchString(content) {
+			content = pattern.ReplaceAllString(content, assignment)
+		} else {
+			if content != "" && !strings.HasSuffix(content, "\n") {
+				content += newline
+			}
+			content += assignment + newline
+		}
+	}
+	if strings.HasPrefix(string(raw), "\ufeff") {
+		content = "\ufeff" + content
+	}
+	if _, err := writeConfigContent(target, content); err != nil {
+		return nil, err
+	}
+	result["updated"] = true
+	return result, nil
 }
 
 func ParseCredentialInput(text string, set4k bool) (defaultSecret, fourKSecret string, err error) {

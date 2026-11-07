@@ -404,7 +404,13 @@ func UpdateSkill(ctx context.Context, root, codexHome string, dryRun bool) (map[
 		if err != nil {
 			return nil, err
 		}
-		return updateResult(target, oldDigest, newDigest, archiveDigest, true, oldDigest != newDigest), nil
+		migration, err := MigrateDefaultModel(CredentialPath(codexHome), true)
+		if err != nil {
+			return nil, err
+		}
+		result := updateResult(target, oldDigest, newDigest, archiveDigest, true, oldDigest != newDigest)
+		result["model_migration"] = migration
+		return result, nil
 	}
 
 	transactionRoot := filepath.Join(codexHome, TransactionDirectory)
@@ -449,10 +455,16 @@ func UpdateSkill(ctx context.Context, root, codexHome string, dryRun bool) (map[
 		return nil, err
 	}
 	if oldDigest == newDigest {
+		migration, err := MigrateDefaultModel(CredentialPath(codexHome), false)
+		if err != nil {
+			return nil, err
+		}
 		if err := atomicWriteJSON(filepath.Join(target, MetadataFilename), metadata); err != nil {
 			return nil, err
 		}
-		return updateResult(target, oldDigest, newDigest, archiveDigest, false, false), nil
+		result := updateResult(target, oldDigest, newDigest, archiveDigest, false, false)
+		result["model_migration"] = migration
+		return result, nil
 	}
 	restoreDirectory := leaveDirectory(target, codexHome)
 	defer restoreDirectory()
@@ -466,7 +478,20 @@ func UpdateSkill(ctx context.Context, root, codexHome string, dryRun bool) (map[
 		}
 		return nil, fmt.Errorf("Skill update failed; the previous installation was restored: %w", err)
 	}
+	migration, err := MigrateDefaultModel(CredentialPath(codexHome), false)
+	if err != nil {
+		if moveErr := moveSkillDirectory(target, stage); moveErr != nil {
+			cleanupTransaction = false
+			return nil, fmt.Errorf("model migration failed; previous installation preserved at %s", backup)
+		}
+		if restoreErr := moveSkillDirectory(backup, target); restoreErr != nil {
+			cleanupTransaction = false
+			return nil, fmt.Errorf("model migration failed; previous installation preserved at %s", backup)
+		}
+		return nil, fmt.Errorf("model migration failed; previous installation restored: %w", err)
+	}
 	result := updateResult(target, oldDigest, newDigest, archiveDigest, false, true)
+	result["model_migration"] = migration
 	result["updated"] = true
 	return result, nil
 }
